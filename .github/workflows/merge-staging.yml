@@ -1,0 +1,37 @@
+name: merged-staging
+
+on:
+  push:
+    branches:
+      - staging
+
+jobs:
+  Deploy:
+    name: Deploy the staging branch by @${{ github.actor }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Connect to an EC2 instance and execute scripts
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.USER_NAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd id-api-staging
+            git fetch --all
+            git checkout staging
+            git reset --hard origin/staging
+            git pull origin staging
+            sudo docker-compose up --build -d
+            sudo docker image prune -a -f
+            sudo docker builder prune -f
+            export NVM_DIR=~/.nvm
+            source ~/.nvm/nvm.sh
+            npm i
+            npm run migration
+            npm run ts src/seeding/default-seeding.ts
+            sudo docker ps -a
+            df -h

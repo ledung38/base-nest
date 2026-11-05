@@ -1,0 +1,37 @@
+name: merged-master
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  Deploy:
+    name: Deploy the master branch by @${{ github.actor }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Connect to an EC2 instance and execute scripts
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST_PROD }}
+          username: ${{ secrets.USER_NAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd id-api
+            git fetch --all
+            git checkout master
+            git reset --hard origin/master
+            git pull origin master
+            sudo docker-compose up --build -d
+            sudo docker image prune -a -f
+            sudo docker builder prune -f
+            export NVM_DIR=~/.nvm
+            source ~/.nvm/nvm.sh
+            npm i
+            npm run migration
+            npm run ts src/seeding/default-seeding.ts
+            sudo docker ps -a
+            df -h

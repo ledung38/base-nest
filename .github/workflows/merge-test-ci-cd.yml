@@ -1,0 +1,37 @@
+name: merged-test-ci-cd
+
+on:
+  push:
+    branches:
+      - test-ci-cd # this for testing
+
+jobs:
+  Deploy:
+    name: Deploy the test-ci-cd branch by @${{ github.actor }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Connect to an EC2 instance and execute scripts
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.USER_NAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd id-api
+            git fetch --all
+            git checkout test-ci-cd
+            git reset --hard origin/test-ci-cd
+            git pull origin test-ci-cd
+            sudo docker-compose up --build -d
+            sudo docker image prune -a -f
+            sudo docker builder prune -f
+            export NVM_DIR=~/.nvm
+            source ~/.nvm/nvm.sh
+            npm i
+            npm run migration
+            npm run ts src/seeding/default-seeding.ts
+            sudo docker ps -a
+            df -h

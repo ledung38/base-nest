@@ -1,0 +1,39 @@
+version: '3.5'
+
+networks:
+  id-network-dev:
+    driver: bridge
+
+volumes: # add this section
+  id-pg-volume-dev:
+  id-redis-volume-dev:
+
+services:
+  db:
+    container_name: id-database-pg-dev
+    image: postgres:15.2
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - id-network-dev
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - id-pg-volume-dev:/var/lib/pg/data
+    ports:
+      - ${DB_PORT}:5432
+  redis:
+    container_name: id-redis-dev
+    image: redis:7.2.4
+    restart: always
+    env_file:
+      - .env
+    networks:
+      - id-network-dev
+    volumes:
+      - id-redis-volume-dev:/data
+    ports:
+      - ${REDIS_PORT}:6379

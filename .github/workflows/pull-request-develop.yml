@@ -1,0 +1,34 @@
+name: pr-into-develop
+on:
+  pull_request:
+    branches:
+      - develop
+      # - test-ci-cd # this for testing
+
+jobs:
+  CI:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20.11.1]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Lint code
+        run: npm run lint
+
+      # - name: Run tests
+      #   run: npm run test
+
+      - name: Run build
+        run: npm run build
