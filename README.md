@@ -7,26 +7,32 @@ A robust, production-ready, enterprise-grade NestJS starter kit featuring Authen
 ## 🚀 Quick Start
 
 ### Prerequisites
+
 - **Node.js**: `>= 20.x`
 - **Docker & Docker Compose** (PostgreSQL & Redis)
 
 ### Step 1: Install Dependencies
+
 ```bash
 npm install
 ```
 
 ### Step 2: Environment Configuration
+
 ```bash
 cp .env.example .env
 ```
-*(Adjust the database credentials and secrets in `.env` if necessary)*
+
+_(Adjust the database credentials and secrets in `.env` if necessary)_
 
 ### Step 3: Start Local Infrastructure (Docker)
+
 ```bash
 docker-compose -f docker-compose-dev.yml up -d
 ```
 
 ### Step 4: Run Database Migration & Seeding
+
 ```bash
 # Run TypeORM migration (creates base tables)
 npm run migration
@@ -34,12 +40,15 @@ npm run migration
 # Seed initial roles, permissions, and super admin account
 npm run seed
 ```
+
 > Default Super Admin: `admin` / `Admin@123`
 
 ### Step 5: Start Development Server
+
 ```bash
 npm run start:dev
 ```
+
 - **App URL**: `http://localhost:8000/api`
 - **Swagger Documentation**: `http://localhost:8000/api-docs`
 - **Health Check**: `http://localhost:8000/api/health`
@@ -90,7 +99,10 @@ src/
 ---
 
 ## 🔒 Security & Best Practices
+
 - **Password Hashing:** 100% Bcrypt salted hashing (one-way).
 - **JWT Protection:** Proper token validation and expiration checking.
 - **Role-Based Access Control:** Role & Permission guard.
 - **Swagger Documentation:** Auto-generated API specs with rich decorators.
+
+hi
