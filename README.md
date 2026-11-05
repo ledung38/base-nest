@@ -104,5 +104,3 @@ src/
 - **JWT Protection:** Proper token validation and expiration checking.
 - **Role-Based Access Control:** Role & Permission guard.
 - **Swagger Documentation:** Auto-generated API specs with rich decorators.
-
-hi222
