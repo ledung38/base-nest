@@ -6,6 +6,7 @@ import * as redisStore from 'cache-manager-redis-store';
 import { AdminModule } from './api/admin/admin.module';
 import { RoleModule } from './api/role/role.module';
 import { UploadModule } from './api/upload/upload.module';
+import { AccountModule } from './api/account/account.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { TypeOrmConfigService, dataSourceFactory } from './config/database.config';
@@ -35,6 +36,7 @@ import { RequestLogMiddleware } from './middleware/request-log.middleware';
     AdminModule,
     RoleModule,
     UploadModule,
+    AccountModule,
   ],
   controllers: [AppController],
   providers: [],

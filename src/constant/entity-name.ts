@@ -6,4 +6,9 @@ export const EntityNameConst = Object.freeze({
   PERMISSION: 'permission',
   UPLOAD: 'upload',
   UPLOAD_CLEAN_HISTORY: 'upload_clean_history',
+  ACCOUNT: 'account',
+  LEDGER_ENTRY: 'ledger_entry',
+  ORDER: 'order',
+  TRADE: 'trade',
+  BOT_CONFIG: 'bot_config',
 });

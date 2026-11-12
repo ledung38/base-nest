@@ -9,8 +9,10 @@ import {
   IsEnum,
   IsNotEmpty,
   IsNumber,
+  IsNumberString,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   MinDate,
   MinLength,
@@ -99,5 +101,21 @@ export function IsSwaggerArray(options: ApiPropertyOptions = {}, isRequire = tru
       ...options,
     }),
     ...(isRequire ? [ArrayNotEmpty()] : []),
+  );
+}
+
+export function IsSwaggerFinancialDecimal(options: ApiPropertyOptions = {}, isRequire = true) {
+  return applyDecorators(
+    ApiPropType('string', isRequire, {
+      example: '10000.00000000',
+      description: 'Số tiền định dạng chuỗi thập phân chuẩn tài chính (tối đa 8 số thập phân)',
+      ...options,
+    }),
+    IsString(),
+    ...(isRequire ? [IsNotEmpty()] : []),
+    IsNumberString(),
+    Matches(/^\d+(\.\d{1,8})?$/, {
+      message: 'Giá trị phải là số dương hợp lệ với tối đa 8 chữ số thập phân',
+    }),
   );
 }

@@ -101,4 +101,13 @@ export const MigrationConst = Object.freeze({
       type: 'jsonb',
       ...option,
     }) as TableColumnOptions,
+
+  numericColumn: (name, precision = 28, scale = 8, option?: ColumnOption) =>
+    ({
+      name,
+      type: 'numeric',
+      precision,
+      scale,
+      ...option,
+    }) as TableColumnOptions,
 });

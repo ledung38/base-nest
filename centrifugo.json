@@ -1,0 +1,31 @@
+{
+  "client": {
+    "allowed_origins": ["*"]
+  },
+  "http_api": {
+    "key": "fintrade-centrifugo-api-key"
+  },
+  "admin": {
+    "enabled": true,
+    "password": "Admin@123",
+    "secret": "fintrade-centrifugo-admin-secret"
+  },
+  "token": {
+    "hmac_secret_key": "fintrade-centrifugo-hmac-secret-key"
+  },
+  "namespaces": [
+    {
+      "name": "public",
+      "allow_subscribe_for_client": true,
+      "presence": true,
+      "history_size": 50,
+      "history_ttl": "300s"
+    },
+    {
+      "name": "personal",
+      "allow_subscribe_for_client": true,
+      "presence": false
+    }
+  ]
+}
+
