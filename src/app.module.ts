@@ -7,6 +7,7 @@ import { AdminModule } from './api/admin/admin.module';
 import { RoleModule } from './api/role/role.module';
 import { UploadModule } from './api/upload/upload.module';
 import { AccountModule } from './api/account/account.module';
+import { MarketModule } from './api/market/market.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { TypeOrmConfigService, dataSourceFactory } from './config/database.config';
@@ -37,6 +38,7 @@ import { RequestLogMiddleware } from './middleware/request-log.middleware';
     RoleModule,
     UploadModule,
     AccountModule,
+    MarketModule,
   ],
   controllers: [AppController],
   providers: [],

@@ -16,6 +16,10 @@
    - [ADR 07: Xử lý số học tài chính: `numeric(28, 8)` & `BigNumber.js` vs Float](#adr-07-xử-lý-số-học-tài-chính-numeric28-8--bignumberjs-vs-float)
    - [ADR 08: Thiết kế trạng thái số dư kép: `available_balance` & `locked_balance`](#adr-08-thiết-kế-trạng-thái-số-dư-kép-available_balance--locked_balance)
    - [ADR 09: Cơ chế Tự kiểm toán (Live Ledger Self-Audit Algorithm)](#adr-09-cơ-chế-tự-kiểm-toán-live-ledger-self-audit-algorithm)
+4. [Pha 3: Dữ liệu Thị trường Binance & Kafka Pipeline (Market Data ADRs)](#4-pha-3-dữ-liệu-thị-trường-binance--kafka-pipeline-market-data-adrs)
+   - [ADR 10: Chiến lược Phân vùng Kafka (Partitioning by Symbol)](#adr-10-chiến-lược-phân-vùng-kafka-partitioning-by-symbol)
+   - [ADR 11: Quản lý Kết nối WebSocket Binance & Tự phục hồi (Auto-Reconnect Backoff)](#adr-11-quản-lý-kết-nối-websocket-binance--tự-phục-hồi-auto-reconnect-backoff)
+   - [ADR 12: Gom Nến Thời Gian Thực (In-Memory OHLCV Aggregation) vs Ghi Trực Tiếp DB](#adr-12-gom-nến-thời-gian-thực-in-memory-ohlcv-aggregation-vs-ghi-trực-tiếp-db)
 
 ---
 
@@ -222,4 +226,76 @@ Nếu độ chênh lệch $\Delta \neq 0$, hệ thống lập tức phát cảnh
 > **Đây là điểm nhấn kỹ thuật cực mạnh khi bạn trình bày với các nhà tuyển dụng Fintech/Ngân hàng.**
 
 ---
+
+## 4. Pha 3: Dữ liệu Thị trường Binance & Kafka Pipeline (Market Data ADRs)
+
+### ADR 10: Chiến lược Phân vùng Kafka (Partitioning by Symbol)
+
+#### Bối cảnh:
+Một sàn giao dịch có hàng chục cặp tiền tệ (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`). Số lượng tick giá bắn về lên tới hàng nghìn message mỗi giây.
+Nếu Kafka Topic `market.ticks` chỉ có 1 partition, toàn bộ hệ thống bị nghẽn cổ chai (Bottleneck) ở 1 consumer duy nhất. Nhưng nếu tăng partition lên 3, 5, 10 mà **không có Partition Key**, Kafka sẽ chia ngẫu nhiên (Round-Robin) các tick của cùng 1 đồng coin vào nhiều partition khác nhau.
+- Hậu quả: Consumer A nhận tick BTC lúc 10:00:01, Consumer B nhận tick BTC lúc 10:00:00. Dữ liệu nến và giá bị xáo trộn trật tự thời gian (Out-of-order execution)!
+
+#### Quyết định:
+- Cấu hình topic `market.ticks` có nhiều partition (mặc định 3 partitions).
+- **Bắt buộc dùng `symbol` làm Partition Key**:
+  ```typescript
+  await producer.send({
+    topic: 'market.ticks',
+    messages: [
+      {
+        key: tick.symbol, // BTCUSDT -> Partition cố định
+        value: JSON.stringify(tick),
+      },
+    ],
+  });
+  ```
+#### Lợi ích:
+1. **Bảo toàn 100% trật tự thời gian**: Mọi tick của `BTCUSDT` sẽ luôn được định tuyến vào **cùng một partition duy nhất**, đảm bảo thứ tự thời gian tuyến tính tuyệt đối.
+2. **Khả năng Scale ngang**: Consumer Group có thể mở rộng nhiều Worker (1 worker xử lý `BTCUSDT`, 1 worker xử lý `ETHUSDT`, v.v.) mà không hề bị xung đột hay tranh chấp dữ liệu.
+
+---
+
+### ADR 11: Quản lý Kết nối WebSocket Binance & Tự phục hồi (Auto-Reconnect Backoff)
+
+#### Bối cảnh:
+Kết nối mạng công cộng Internet tới Binance WebSocket (`stream.binance.com`) không bao giờ ổn định 100%. Các sự cố thường gặp:
+- Đứt cáp quang, rớt mạng tạm thời (Network glitch).
+- Binance định kỳ ngắt kết nối mỗi 24 giờ theo quy chuẩn WebSocket của họ.
+- Tràn bộ đệm (Socket buffer overflow) khi đường truyền bị nghẽn.
+
+#### Quyết định: Xây dựng cơ chế Auto-Reconnect với Exponential Backoff & Circuit Breaker
+1. **Lắng nghe toàn diện các sự kiện**: `open`, `message`, `ping`, `pong`, `error`, `close`.
+2. **Exponential Backoff**: Khi mất kết nối, hệ thống không retry điên cuồng ngay lập tức (dễ bị Binance chặn IP do nghi ngờ DDOS), mà tăng thời gian chờ dần:
+   $$T_{\text{wait}} = \min(1000 \times 2^{\text{retryCount}}, 30000) \text{ ms}$$
+3. **Heartbeat & Zombie Connection Detection**: Nếu sau 30 giây không nhận được bất kỳ ping/message nào từ Binance, worker chủ động ngắt kết nối cũ và tạo kết nối mới sạch sẽ.
+
+---
+
+### ADR 12: Gom Nến Thời Gian Thực (In-Memory OHLCV Aggregation) vs Ghi Trực Tiếp DB
+
+#### Sai lầm phổ biến:
+Nhiều lập trình viên mới làm thường viết code: Cứ mỗi tick Binance bắn về là lập tức thực thi câu lệnh SQL:
+```sql
+INSERT INTO ticks (symbol, price, quantity, timestamp) VALUES (...);
+```
+**Tại sao cách này làm chết Database ngay lập tức?**
+- Thị trường sôi động có thể sinh ra 2,000 - 5,000 tick/giây.
+- PostgreSQL không được thiết kế để chịu 5,000 transaction ghi đĩa mỗi giây trên 1 máy server cá nhân. Ổ đĩa IOPS sẽ chạm trần 100%, khóa connection pool, và toàn bộ API đặt lệnh của người dùng bị tê liệt!
+
+#### Quyết định: Gom nến trong bộ nhớ (In-Memory Rolling Aggregator)
+1. **Mô hình Rolling Window**:
+   Duy trì cấu trúc nến hiện tại trong RAM:
+   - `open`: Giá của tick đầu tiên trong khung giờ.
+   - `high`: $\max(\text{high}, \text{current\_price})$.
+   - `low`: $\min(\text{low}, \text{current\_price})$.
+   - `close`: Giá của tick mới nhất.
+   - `volume`: Tổng tích lũy khối lượng các giao dịch.
+   - `tradesCount`: Số lượng giao dịch trong cây nến.
+2. **Chuyển giao khi hết khung nến**:
+   - Khung 1s / 1m kết thúc: Đóng nến cũ (`isClosed: true`), lưu vào Ring Buffer (hoặc Redis) và bắn vào Centrifugo để vẽ TradingView Chart.
+   - Reset và mở cây nến mới với giá mở cửa kế thừa từ giá đóng cửa của cây nến trước.
+3. **Kết quả**:
+   - Giảm tải tải trọng ghi DB từ **hàng ngàn lần/giây** xuống chỉ còn **1 lần/phút** (nếu lưu nến 1m) hoặc chỉ lưu trong bộ nhớ đệm phục vụ hiển thị đồ thị!
+
 
