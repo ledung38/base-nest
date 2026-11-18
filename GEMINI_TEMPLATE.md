@@ -33,3 +33,5 @@
 - Không tự ý cài thêm package/thư viện ngoài mà không hỏi trước.
 - Không dùng `fetch` trực tiếp, bắt buộc dùng instance `apiClient` từ `src/libs/api.ts`.
 - Không hardcode các chuỗi text hiển thị (bắt buộc dùng i18n / file locale nếu có).
+
+HI
