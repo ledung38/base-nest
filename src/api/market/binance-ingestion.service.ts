@@ -5,7 +5,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ENV } from 'src/config/environment';
-import WebSocket from 'ws';
+import { RawData, WebSocket } from 'ws';
 import { CandleAggregatorService } from './candle-aggregator.service';
 import { MarketKafkaService } from './market-kafka.service';
 import { MarketTick } from './market.interface';
@@ -67,7 +67,7 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
         );
       });
 
-      this.ws.on('message', (rawData: WebSocket.RawData) => {
+      this.ws.on('message', (rawData: RawData) => {
         this.handleMessage(rawData);
       });
 
@@ -95,7 +95,7 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   /**
    * Xử lý gói tin trade stream từ Binance
    */
-  private handleMessage(rawData: WebSocket.RawData) {
+  private handleMessage(rawData: RawData) {
     try {
       const parsed = JSON.parse(rawData.toString());
       const data = parsed.data;

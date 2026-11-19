@@ -8,7 +8,7 @@ export const AdminData: Partial<Admin>[] = [
     id: SeedingConst.ADMIN_SYSTEM_ID,
     username: 'admin',
     email: 'admin@base.local',
-    password: '$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+    password: '$2b$10$BSb3semiKnAhYdEZXNHRU.B0WLZ5KHRxBl1jT6fPcJJglrqp0Fcfe',
     fullName: 'System Administrator',
     gender: Gender.MALE,
     dateOfBirth: new Date('1990-01-01'),

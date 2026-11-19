@@ -36,6 +36,7 @@ export enum OrderTypeEnum {
 }
 
 export enum OrderStatusEnum {
+  QUEUED = 'QUEUED',
   PENDING = 'PENDING',
   PARTIALLY_FILLED = 'PARTIALLY_FILLED',
   FILLED = 'FILLED',

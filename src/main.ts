@@ -24,7 +24,7 @@ async function bootstrap() {
     origin: '*',
     methods: '*',
     credentials: true,
-    allowedHeaders: 'Content-Type, Accept, Authorization, Cache-Control',
+    allowedHeaders: 'Content-Type, Accept, Authorization, Cache-Control, Idempotency-Key',
   });
 
   initAPIDocs({

@@ -1,8 +1,8 @@
 # 📋 Báo Cáo Bàn Giao & Trạng Thái Dự Án (Project Handover)
 ## FinTrade Backend: High-Throughput Algorithmic Trading & Paper-Trading Engine
 
-> **Ngày cập nhật**: 13/11/2026  
-> **Trạng thái tổng thể**: Đã hoàn thành xuất sắc **Pha 1, Pha 2, Pha 3** và toàn bộ hệ thống tài liệu/quy chuẩn code. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (12/12 tests pass). Sẵn sàng bắt đầu **Pha 4**.
+> **Ngày cập nhật**: 18/11/2026  
+> **Trạng thái tổng thể**: Đã hoàn thành **Pha 1, Pha 2, Pha 3, Pha 4** và toàn bộ tài liệu kỹ thuật. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (**25/25 tests pass**). Sẵn sàng bắt đầu **Pha 5**.
 
 ---
 
@@ -13,9 +13,9 @@
 | **Hạ tầng Docker** | ✅ Hoàn tất | Postgres 15, Redis 7, RabbitMQ 3.13, Kafka 3.7 (KRaft), Centrifugo v5 |
 | **Pha 1: Core Setup** | ✅ Hoàn tất | Config environment type-safe, cài đặt các package lõi, Centrifugo config |
 | **Pha 2: Sổ Cái Kép (Ledger)** | ✅ Hoàn tất | Entities `Account` & `LedgerEntry`, Pessimistic Lock, Faucet, Audit tự động |
-| **Pha 3: Market Data & Kafka** | ✅ Hoàn tất | Ingestion Binance WebSocket, Kafka Producer (`key = symbol`), Rolling Candle Aggregator |
-| **Pha 4: Order & RabbitMQ** | ⏳ **Sẵn sàng triển khai** | Tiếp nhận lệnh, Redis Idempotency, RabbitMQ Order Queue |
-| **Pha 5: Matching Engine** | ⏳ Kế hoạch | In-memory Orderbook (Redis), Price-Time Priority, Trade Settlement |
+| **Pha 3: Market Data & Kafka** | ✅ Hoàn tất | Ingestion Binance WebSocket (đã live smoke test), Kafka Producer (`key = symbol`), Rolling Candle Aggregator |
+| **Pha 4: Order & RabbitMQ** | ✅ Hoàn tất | Entity `Order` + Migration, Redis + DB Idempotency, RabbitMQ (Publisher Confirms, Manual Ack, DLX/DLQ), Worker khóa tiền & Hủy lệnh |
+| **Pha 5: Matching Engine** | ⏳ **Sẵn sàng triển khai** | In-memory Orderbook (Redis), Price-Time Priority, Trade Settlement & PnL |
 | **Pha 6: Centrifugo Gateway** | ⏳ Kế hoạch | Broadcast tick, depth và sự kiện khớp lệnh ra frontend Next.js |
 | **Pha 7: Trading Bot** | ⏳ Kế hoạch | Bot Grid Trading & Chiến thuật EMA Cross |
 | **Pha 8: K3s Deployment** | ⏳ Kế hoạch | Dockerfile multi-stage, K3s manifests, tối ưu RAM $\le$ 8GB |

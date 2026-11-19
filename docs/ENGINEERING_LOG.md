@@ -20,6 +20,10 @@
    - [ADR 10: Chiến lược Phân vùng Kafka (Partitioning by Symbol)](#adr-10-chiến-lược-phân-vùng-kafka-partitioning-by-symbol)
    - [ADR 11: Quản lý Kết nối WebSocket Binance & Tự phục hồi (Auto-Reconnect Backoff)](#adr-11-quản-lý-kết-nối-websocket-binance--tự-phục-hồi-auto-reconnect-backoff)
    - [ADR 12: Gom Nến Thời Gian Thực (In-Memory OHLCV Aggregation) vs Ghi Trực Tiếp DB](#adr-12-gom-nến-thời-gian-thực-in-memory-ohlcv-aggregation-vs-ghi-trực-tiếp-db)
+5. [Pha 4: Đặt Lệnh, Chống Trùng Lặp & RabbitMQ Transaction Plane (Order ADRs)](#5-pha-4-đặt-lệnh-chống-trùng-lặp--rabbitmq-transaction-plane-order-adrs)
+   - [ADR 13: Idempotency 2 Tầng (Redis Fast-Path + PostgreSQL Unique Index)](#adr-13-idempotency-2-tầng-redis-fast-path--postgresql-unique-index)
+   - [ADR 14: RabbitMQ Topology Chuẩn Giao Dịch (Publisher Confirms, Manual Ack, DLX/DLQ)](#adr-14-rabbitmq-topology-chuẩn-giao-dịch-publisher-confirms-manual-ack-dlxdlq)
+   - [ADR 15: Máy Trạng Thái Lệnh Bất Đồng Bộ & Market Data Stale Circuit Breaker](#adr-15-máy-trạng-thái-lệnh-bất-đồng-bộ--market-data-stale-circuit-breaker)
 
 ---
 
@@ -297,5 +301,59 @@ INSERT INTO ticks (symbol, price, quantity, timestamp) VALUES (...);
    - Reset và mở cây nến mới với giá mở cửa kế thừa từ giá đóng cửa của cây nến trước.
 3. **Kết quả**:
    - Giảm tải tải trọng ghi DB từ **hàng ngàn lần/giây** xuống chỉ còn **1 lần/phút** (nếu lưu nến 1m) hoặc chỉ lưu trong bộ nhớ đệm phục vụ hiển thị đồ thị!
+
+---
+
+## 5. Pha 4: Đặt Lệnh, Chống Trùng Lặp & RabbitMQ Transaction Plane (Order ADRs)
+
+### ADR 13: Idempotency 2 Tầng (Redis Fast-Path + PostgreSQL Unique Index)
+
+#### Bối cảnh:
+Trong giao dịch tài chính, mạng chập chờn hoặc người dùng bấm đúp nút "Mua" 2 lần liên tiếp có thể gửi cùng một yêu cầu đặt lệnh lên backend nhiều lần. Nếu không có cơ chế chống trùng lặp (Idempotency), người dùng sẽ bị trừ tiền và mua gấp đôi số lượng coin mong muốn.
+
+#### Quyết định: Cơ chế phòng thủ 2 lớp (Defense in Depth)
+1. **Lớp 1 — Redis Fast-Path (TTL 120s)**:
+   - Mọi request `POST /api/orders` **bắt buộc** truyền Header `Idempotency-Key` (UUID phía client sinh cho mỗi ý định đặt lệnh).
+   - Khi request đầu tiên tới, backend đặt trạng thái `PROCESSING` trong Redis. Nếu request thứ 2 trùng key ập tới trong lúc request 1 đang chạy $\rightarrow$ trả về `409 Conflict` ngay lập tức.
+   - Khi lệnh đã được đưa an toàn vào RabbitMQ, cập nhật Redis thành `COMPLETED` kèm snapshot object lệnh. Nếu mạng retry lại sau đó $\rightarrow$ trả về đúng kết quả lệnh cũ (`idempotentReplay: true`) mà không đụng vào DB hay RabbitMQ.
+   - Nếu xảy ra lỗi validation hoặc RabbitMQ tạm ngưng trước khi lệnh vào hàng đợi $\rightarrow$ xóa khóa Redis để người dùng có thể retry sạch sẽ với cùng `Idempotency-Key`.
+2. **Lớp 2 — PostgreSQL Unique Index (`IDX_order_idempotency_key`)**:
+   - Đề phòng trường hợp Redis hết TTL hoặc bị restart, cột `idempotency_key` trong bảng `order` có ràng buộc `UNIQUE` tuyệt đối ở tầng CSDL.
+
+---
+
+### ADR 14: RabbitMQ Topology Chuẩn Giao Dịch (Publisher Confirms, Manual Ack, DLX/DLQ)
+
+#### Bối cảnh:
+Nếu API `POST /api/orders` trực tiếp thực hiện toàn bộ quy trình khóa ví, khớp lệnh đồng bộ trong 1 HTTP request, khi bot hoặc hàng nghìn người dùng đặt lệnh đồng loạt, DB connection pool sẽ quá tải và xảy ra timeout hàng loạt.
+
+#### Quyết định: Tách bạch Tiếp nhận (API) và Thực thi (Worker) qua RabbitMQ
+1. **Publisher Confirms (`createConfirmChannel` + `waitForConfirms`)**:
+   - Producer chỉ trả về thành công cho client sau khi RabbitMQ xác nhận đã lưu message bền vững (`persistent: true`) xuống đĩa của `orders.queue` (`durable: true`).
+2. **Manual Ack (`noAck: false`) & Prefetch (`prefetch = 10`)**:
+   - Worker chỉ giới hạn nhận tối đa 10 lệnh cùng lúc để tránh quá tải RAM/DB pool (Backpressure).
+   - Message chỉ bị xóa khỏi queue sau khi DB transaction đã **commit thành công**.
+3. **Phân biệt Lỗi Nghiệp vụ vs Lỗi Hệ thống với Dead Letter Queue (`orders.dlx` $\rightarrow$ `orders.dlq`)**:
+   - **Lỗi nghiệp vụ** (ví dụ: không đủ số dư `INSUFFICIENT_AVAILABLE_BALANCE`): Cập nhật lệnh sang `REJECTED` kèm `rejectReason`, phát event `order.rejected` và **ACK** message. *Tuyệt đối không đẩy lỗi nghiệp vụ vào DLQ hay retry vô hạn!*
+   - **Lỗi hệ thống** (mất kết nối DB, deadlock bất ngờ): Rollback transaction và **NACK (`requeue: false`)** để RabbitMQ định tuyến message sang `orders.dlq` phục vụ kiểm tra/replay an toàn.
+4. **Domain Events Exchange (`fintrade.events`, kiểu `topic`)**:
+   - Worker sau khi commit transaction sẽ phát sự kiện `order.pending`, `order.rejected`, `order.cancelled` lên topic exchange, giúp Pha 5 (Matching Engine) và Pha 6 (Centrifugo) tiêu thụ độc lập mà không bị gắn chặt vào `OrderService`.
+
+---
+
+### ADR 15: Máy Trạng Thái Lệnh Bất Đồng Bộ & Market Data Stale Circuit Breaker
+
+#### Vòng đời trạng thái lệnh (`OrderStatusEnum`):
+```text
+POST /api/orders ──> [QUEUED] ──(RabbitMQ Worker: AccountService.lockBalance)──> [PENDING]
+                        │                                                             │
+                        └──(Không đủ số dư)──> [REJECTED]                             ├──(DELETE /api/orders/:id)──> [CANCELLED] (unlockBalance)
+                                                                                      └──(Pha 5 Matching Engine)───> [PARTIALLY_FILLED / FILLED]
+```
+
+#### Quy tắc bảo vệ tính nhất quán:
+1. **Worker Idempotency Guard**: Trước khi gọi `lockBalance`, worker khóa dòng `Order` bằng `SELECT FOR UPDATE` và kiểm tra `order.status === QUEUED`. Nếu message bị RabbitMQ gửi lại do sự cố mạng sau khi worker đã xử lý xong, worker sẽ bỏ qua và ACK ngay $\rightarrow$ không bao giờ khóa tiền 2 lần!
+2. **Market Data Stale Circuit Breaker**: Đối với lệnh `MARKET`, nếu chưa có tick từ Binance hoặc tick cuối cùng đã quá **5 giây** (`Date.now() - latestTick.timestamp > 5000`), hệ thống lập tức từ chối bằng lỗi `MARKET_DATA_STALE` để tránh khớp lệnh theo giá cũ gây thiệt hại cho người dùng.
+
 
 
