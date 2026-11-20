@@ -1,8 +1,8 @@
 # 📋 Báo Cáo Bàn Giao & Trạng Thái Dự Án (Project Handover)
 ## FinTrade Backend: High-Throughput Algorithmic Trading & Paper-Trading Engine
 
-> **Ngày cập nhật**: 18/11/2026  
-> **Trạng thái tổng thể**: Đã hoàn thành **Pha 1, Pha 2, Pha 3, Pha 4** và toàn bộ tài liệu kỹ thuật. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (**25/25 tests pass**). Sẵn sàng bắt đầu **Pha 5**.
+> **Ngày cập nhật**: 19/11/2026  
+> **Trạng thái tổng thể**: Đã hoàn thành **Pha 1, Pha 2, Pha 3, Pha 4, Pha 5** và toàn bộ tài liệu kỹ thuật. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (**46/46 tests pass**). Sẵn sàng bắt đầu **Pha 6 (Centrifugo Realtime Gateway)**.
 
 ---
 
@@ -12,11 +12,11 @@
 | :--- | :--- | :--- |
 | **Hạ tầng Docker** | ✅ Hoàn tất | Postgres 15, Redis 7, RabbitMQ 3.13, Kafka 3.7 (KRaft), Centrifugo v5 |
 | **Pha 1: Core Setup** | ✅ Hoàn tất | Config environment type-safe, cài đặt các package lõi, Centrifugo config |
-| **Pha 2: Sổ Cái Kép (Ledger)** | ✅ Hoàn tất | Entities `Account` & `LedgerEntry`, Pessimistic Lock, Faucet, Audit tự động |
-| **Pha 3: Market Data & Kafka** | ✅ Hoàn tất | Ingestion Binance WebSocket (đã live smoke test), Kafka Producer (`key = symbol`), Rolling Candle Aggregator |
-| **Pha 4: Order & RabbitMQ** | ✅ Hoàn tất | Entity `Order` + Migration, Redis + DB Idempotency, RabbitMQ (Publisher Confirms, Manual Ack, DLX/DLQ), Worker khóa tiền & Hủy lệnh |
-| **Pha 5: Matching Engine** | ⏳ **Sẵn sàng triển khai** | In-memory Orderbook (Redis), Price-Time Priority, Trade Settlement & PnL |
-| **Pha 6: Centrifugo Gateway** | ⏳ Kế hoạch | Broadcast tick, depth và sự kiện khớp lệnh ra frontend Next.js |
+| **Pha 2: Sổ Cái Kép (Ledger)** | ✅ Hoàn tất | Entities `Account` & `LedgerEntry`, Pessimistic Lock, Faucet, Audit tự động (8/8 tests pass) |
+| **Pha 3: Market Data & Kafka** | ✅ Hoàn tất | Ingestion Binance WebSocket, Dedicated Partition Mapping cho Kafka (`BTCUSDT: 0`, `ETHUSDT: 1`, `SOLUSDT: 2`), In-memory Rolling Candle (12/12 tests pass) |
+| **Pha 4: Order & RabbitMQ** | ✅ Hoàn tất | Entity `Order` + Migration, Redis + DB Idempotency 2 tầng, RabbitMQ (Publisher Confirms, Manual Ack, DLX/DLQ), Worker khóa tiền & Hủy lệnh (13/13 tests pass) |
+| **Pha 5: Matching Engine** | ✅ Hoàn tất | In-Memory Orderbook (Price-Time Priority), Khớp lệnh lai (P2P + Simulated Binance Liquidity), Hoàn trả ký quỹ thặng dư (Price Improvement), Quyết toán sổ cái kép (13/13 tests pass) |
+| **Pha 6: Centrifugo Gateway** | ⏳ **Sẵn sàng triển khai** | Broadcast tick, depth L2 và sự kiện khớp lệnh `trade.executed` ra frontend Next.js |
 | **Pha 7: Trading Bot** | ⏳ Kế hoạch | Bot Grid Trading & Chiến thuật EMA Cross |
 | **Pha 8: K3s Deployment** | ⏳ Kế hoạch | Dockerfile multi-stage, K3s manifests, tối ưu RAM $\le$ 8GB |
 
@@ -59,39 +59,44 @@
 
 ## 3. Các Bước Tiếp Theo Cần Triển Khai (Next Steps)
 
-### 👉 Nhiệm vụ sắp tới: **Pha 4 - Order Submission & RabbitMQ Processing**
-1. **Thiết kế Entity `Order`**:
-   - Bảng `orders`: `id`, `user_id`, `idempotency_key` (Unique), `symbol`, `side` (BUY/SELL), `type` (LIMIT/MARKET), `price`, `quantity`, `filled_quantity`, `status` (PENDING, FILLED, CANCELLED, REJECTED).
-   - Migration tạo bảng `orders` và các index.
-2. **Cơ chế Idempotency qua Redis**:
-   - Chặn người dùng hoặc bot click đúp lệnh trong vòng TTL (ví dụ 120s). Nếu trùng key, trả về kết quả lệnh trước đó hoặc báo lỗi duplicate.
-3. **RabbitMQ Order Queue**:
-   - Kết nối RabbitMQ Producer đẩy lệnh giao dịch vào queue `orders.queue` (durable = true, publisher confirms).
-   - Cấu hình Dead Letter Queue (`orders.dlq`) để chứa các message lỗi xử lý.
-4. **RabbitMQ Consumer Worker**:
-   - Lắng nghe lệnh từ `orders.queue` với cơ chế **Manual Ack**.
-   - Kiểm tra số dư và gọi `AccountService.lockBalance` an toàn.
-   - Chuyển trạng thái lệnh sang `PENDING` và chuyển tiếp sang Matching Engine.
+### 👉 Nhiệm vụ sắp tới: **Pha 6 - Realtime Gateway với Centrifugo & Client Throttling**
+1. **Centrifugo Service / Client**:
+   - Sử dụng Centrifugo HTTP API (port 8001) để publish dữ liệu ra các channels.
+   - Quản lý JWT Subscription Token HMAC-SHA256 cho người dùng subscribe kênh cá nhân (`personal:user_id`).
+2. **Channel Namespaces (`centrifugo.json`)**:
+   - `public:ticks:<symbol>`: Bắn tick giá Binance thời gian thực.
+   - `public:orderbook:<symbol>`: Bắn L2 Orderbook Depth (throttling 100ms bảo vệ DOM UI).
+   - `public:trades:<symbol>`: Bắn các giao dịch vừa khớp trên thị trường.
+   - `personal:<user_id>`: Bắn biến động số dư và trạng thái lệnh của riêng từng user.
+3. **Consumer lắng nghe Domain Events**:
+   - Lắng nghe `trade.executed`, `order.pending`, `order.cancelled` từ RabbitMQ exchange `fintrade.events` để chuyển tiếp tức thì sang Centrifugo.
 
 ---
 
 ## 4. Lệnh Kiểm Tra Nhanh Hệ Thống (Quick Health Checks)
 
 ```bash
-# 1. Chạy toàn bộ Unit Tests (hiện có 12/12 tests PASS)
+# 1. Chạy toàn bộ Unit Tests (hiện có 46/46 tests PASS - 6 test suites)
 npm.cmd run test
 
 # 2. Kiểm tra biên dịch TypeScript
 npm.cmd run build
 
 # 3. Chạy test riêng từng service
+npm.cmd run test -- orderbook.spec.ts
+npm.cmd run test -- matching.service.spec.ts
+npm.cmd run test -- order.service.spec.ts
 npm.cmd run test -- account.service.spec.ts
 npm.cmd run test -- candle-aggregator.service.spec.ts
+npm.cmd run test -- market-kafka.service.spec.ts
 
 # 4. Khởi động hạ tầng Docker
 docker-compose -f docker-compose-dev.yml up -d
 
 # 5. Chạy dev server
+npm.cmd run start:dev
+# Swagger UI: http://localhost:8000/api-docs
+```
 npm.cmd run start:dev
 # Swagger UI: http://localhost:8000/api-docs
 ```

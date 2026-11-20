@@ -13,10 +13,17 @@ import {
 } from 'amqplib';
 import { ENV } from 'src/config/environment';
 import {
+  AnyDomainEvent,
   OrderDomainEvent,
   OrderQueueHandler,
   OrderQueueMessage,
 } from './order.interface';
+
+interface EventConsumerRegistration {
+  queueName: string;
+  bindingPattern: string;
+  handler: (routingKey: string, payload: any) => Promise<void>;
+}
 
 @Injectable()
 export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
@@ -28,6 +35,7 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
   private confirmChannel: ConfirmChannel | null = null;
   private consumerChannel: Channel | null = null;
   private orderHandler: OrderQueueHandler | null = null;
+  private eventConsumers: EventConsumerRegistration[] = [];
 
   private isConnected = false;
   private isDestroyed = false;
@@ -103,6 +111,11 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
       // 4. Nếu worker handler đã đăng ký, kích hoạt consumer ngay
       if (this.orderHandler) {
         await this.startConsuming();
+      }
+
+      // 5. Khởi động lại các event consumer đã đăng ký (Idempotent)
+      for (const reg of this.eventConsumers) {
+        await this.startEventConsumer(reg);
       }
 
       return true;
@@ -208,9 +221,9 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Phát sự kiện miền (order.pending, order.rejected, order.cancelled) lên Topic Exchange
+   * Phát sự kiện miền (order.pending, order.rejected, order.cancelled, trade.executed) lên Topic Exchange
    */
-  async publishEvent(event: OrderDomainEvent): Promise<void> {
+  async publishEvent(event: AnyDomainEvent): Promise<void> {
     if (!this.isConnected || !this.confirmChannel) return;
 
     try {
@@ -228,7 +241,73 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
       await this.confirmChannel.waitForConfirms();
     } catch (err) {
       this.logger.warn(
-        `Failed to publish domain event [${event.event}] for order #${event.orderId}: ${(err as Error).message}`,
+        `Failed to publish domain event [${event.event}]: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Đăng ký consumer lắng nghe Domain Events từ Topic Exchange 'fintrade.events'
+   * Ví dụ: queueName = 'matching.events.queue', pattern = 'order.*'
+   */
+  async registerEventConsumer(
+    queueName: string,
+    bindingPattern: string,
+    handler: (routingKey: string, payload: any) => Promise<void>,
+  ): Promise<void> {
+    const registration: EventConsumerRegistration = {
+      queueName,
+      bindingPattern,
+      handler,
+    };
+    this.eventConsumers.push(registration);
+
+    if (this.isConnected && this.connection) {
+      await this.startEventConsumer(registration);
+    }
+  }
+
+  private async startEventConsumer(
+    registration: EventConsumerRegistration,
+  ): Promise<void> {
+    if (!this.connection) return;
+
+    try {
+      const channel = await this.connection.createChannel();
+      await channel.prefetch(20);
+      await channel.assertQueue(registration.queueName, { durable: true });
+      await channel.bindQueue(
+        registration.queueName,
+        ENV.RABBITMQ.EVENT_EXCHANGE,
+        registration.bindingPattern,
+      );
+
+      await channel.consume(
+        registration.queueName,
+        async (msg: ConsumeMessage | null) => {
+          if (!msg) return;
+          try {
+            const routingKey = msg.fields.routingKey;
+            const payload = JSON.parse(msg.content.toString());
+            await registration.handler(routingKey, payload);
+            channel.ack(msg);
+          } catch (err) {
+            this.logger.error(
+              `Error handling domain event [${msg.fields.routingKey}] in queue [${registration.queueName}]: ${(err as Error).message}`,
+            );
+            // NACK và không requeue để tránh poison message vòng lặp
+            channel.nack(msg, false, false);
+          }
+        },
+        { noAck: false },
+      );
+
+      this.logger.log(
+        `Event consumer ready on queue=[${registration.queueName}], pattern=[${registration.bindingPattern}]`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to start event consumer for queue [${registration.queueName}]: ${(err as Error).message}`,
       );
     }
   }

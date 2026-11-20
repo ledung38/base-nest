@@ -355,5 +355,113 @@ POST /api/orders ──> [QUEUED] ──(RabbitMQ Worker: AccountService.lockBal
 1. **Worker Idempotency Guard**: Trước khi gọi `lockBalance`, worker khóa dòng `Order` bằng `SELECT FOR UPDATE` và kiểm tra `order.status === QUEUED`. Nếu message bị RabbitMQ gửi lại do sự cố mạng sau khi worker đã xử lý xong, worker sẽ bỏ qua và ACK ngay $\rightarrow$ không bao giờ khóa tiền 2 lần!
 2. **Market Data Stale Circuit Breaker**: Đối với lệnh `MARKET`, nếu chưa có tick từ Binance hoặc tick cuối cùng đã quá **5 giây** (`Date.now() - latestTick.timestamp > 5000`), hệ thống lập tức từ chối bằng lỗi `MARKET_DATA_STALE` để tránh khớp lệnh theo giá cũ gây thiệt hại cho người dùng.
 
+---
+
+## 6. Tối Ưu Hóa Hạ Tầng Streaming (Kafka & Data Plane ADRs)
+
+### ADR 16: Phân Bổ Kafka Partition Theo Symbol (Dedicated Partition Mapping vs Murmur2 Hash Collision)
+
+#### Bối cảnh:
+Trong Pha 3, khi topic `market.ticks` được tạo với 3 partitions (0, 1, 2) cho 3 cặp giao dịch (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`), dữ liệu thực tế kiểm tra từ broker cho thấy sự bất đối xứng nghiêm trọng:
+- `Partition 0`: 29,226 messages (chỉ chứa `SOLUSDT`)
+- `Partition 1`: **0 messages** (hoàn toàn rỗng!)
+- `Partition 2`: 280,925 messages (chứa cả `BTCUSDT` và `ETHUSDT`)
+
+#### Phân tích nguyên nhân gốc rễ (Root Cause Analysis):
+1. **Vị trí tính Partition**: Việc chọn partition diễn ra hoàn toàn ở **Kafka Producer (Client-side)** trước khi bắn qua mạng, broker không tham gia vào việc phân chia này.
+2. **Thuật toán băm mặc định**: Khi chỉ truyền `key` mà không truyền `partition`, KafkaJS và Kafka Java Client dùng thuật toán Murmur2:
+   $$\text{partition} = (\text{murmur2}(\text{key}) \ \& \ \text{0x7fffffff}) \pmod{\text{numPartitions}}$$
+3. **Bản chất cam kết của Kafka**:
+   - Kafka **chỉ cam kết**: *Tất cả các message có CÙNG KEY luôn rơi vào CÙNG 1 PARTITION* (để bảo toàn thứ tự FIFO theo key).
+   - Kafka **tuyệt đối không cam kết**: *Các key KHÁC NHAU sẽ rơi vào các partition KHÁC NHAU*.
+4. **Xác suất va chạm toán học (Birthday Paradox)**:
+   - Với 3 key ngẫu nhiên và 3 partitions, xác suất để 3 key phân bổ hoàn hảo vào 3 partition riêng biệt chỉ là:
+     $$P = \frac{3}{3} \times \frac{2}{3} \times \frac{1}{3} = \frac{2}{9} \approx 22.22\%$$
+   - Xác suất xảy ra va chạm (Collision — có partition trống và có partition ôm nhiều coin) lên tới **$77.78\%$**!
+   - Chạy hàm băm thực tế:
+     - `murmur2("BTCUSDT") % 3 = 2`
+     - `murmur2("ETHUSDT") % 3 = 2` $\rightarrow$ Va chạm trực tiếp!
+     - `murmur2("SOLUSDT") % 3 = 0`
+     - Dẫn tới Partition 1 có **0 messages**.
+
+#### Tác hại trong Sàn Giao Dịch (FinTech Engine):
+1. **Lệch tải (Load Skew)**: Worker phụ trách Partition 2 phải gánh gấp đôi tải lượng tick của 2 đồng coin biến động mạnh nhất (BTC và ETH).
+2. **Lãng phí tài nguyên**: Worker phụ trách Partition 1 chạy không tải.
+3. **Nghẽn dây chuyền (Head-of-Line Blocking)**: Khi luồng tick BTC bùng nổ (ví dụ 10,000 tick/s), worker Partition 2 bị chậm lại, kéo theo luồng tick ETH cũng bị trễ theo dù volume ETH lúc đó đang bình thường.
+
+#### Quyết định: Áp dụng Dedicated Symbol-to-Partition Mapping
+1. **Cơ chế ghi đè của Kafka**: Trong source code của KafkaJS (`legacy/partitioner.js`):
+   ```javascript
+   if (message.partition !== null && message.partition !== undefined) {
+     return message.partition; // Bỏ qua hoàn toàn hàm băm Murmur2
+   }
+   ```
+2. **Bảng ánh xạ tĩnh cố định**:
+   ```typescript
+   export const SYMBOL_PARTITIONS: Record<string, number> = {
+     BTCUSDT: 0,
+     ETHUSDT: 1,
+     SOLUSDT: 2,
+   };
+   ```
+3. **Cơ chế Fallback**: Với các cặp coin mới ngoài 3 coin cốt lõi, hàm `getPartitionForSymbol` sử dụng hàm băm DJB2 chia lấy dư theo `totalPartitions` để phân bổ đồng đều.
+4. **Đồng bộ cả Tick và Candle**: Cả `sendTick(tick)` và `sendCandle(candle)` đều truyền trực tiếp `partition: getPartitionForSymbol(...)`.
+
+#### Lợi ích đạt được:
+- **Deterministic 100%**: Không phụ thuộc vào sự ngẫu nhiên của hàm băm Murmur2.
+- **Worker Isolation (Cách ly theo đồng coin)**: Khi chạy Consumer Group 3 workers, mỗi worker phụ trách độc quyền 1 đồng coin duy nhất. Một đồng coin bị bão volume không bao giờ ảnh hưởng tới các đồng coin khác.
+- **Tải phân bổ đều 100%**: Mỗi partition có đúng 1 stream dữ liệu tương ứng.
+
+---
+
+## 7. Pha 5: In-Memory Matching Engine & Trade Settlement (Matching ADRs)
+
+### ADR 17: Kiến Trúc Sổ Lệnh In-Memory (Price-Time Priority & RAM State Recovery)
+
+#### Bối cảnh:
+Trong sàn giao dịch tài chính, việc khớp lệnh (Matching Engine) đòi hỏi độ trễ cực thấp (Sub-millisecond $< 1\text{ms}$). Nếu mỗi lệnh đến phải thực hiện truy vấn CSDL PostgreSQL (`SELECT ... ORDER BY price, created_at FOR UPDATE`) để tìm lệnh đối ứng, IOPS của CSDL sẽ bị nghẽn (Disk bottleneck) và hệ thống sẽ sập khi lưu lượng thị trường tăng cao.
+
+#### Quyết định kiến trúc: Sổ Lệnh 100% Trong RAM (In-Memory Orderbook)
+1. **Cấu trúc Dữ liệu Sổ Lệnh (`OrderBook`)**:
+   - `bids` (Bên Mua): Mảng sắp xếp **giảm dần theo giá (Descending)**. Lệnh giá cao hơn được ưu tiên khớp trước.
+   - `asks` (Bên Bán): Mảng sắp xếp **tăng dần theo giá (Ascending)**. Lệnh giá rẻ hơn được ưu tiên khớp trước.
+   - **Quy tắc FIFO (First-In-First-Out)**: Nếu hai lệnh có cùng mức giá, lệnh nào được tạo sớm hơn (`createdAt` nhỏ hơn) sẽ đứng trước và được khớp trước (Price-Time Priority).
+   - `orderMap`: Bảng băm $O(1)$ lưu `orderId -> OrderBookEntry` phục vụ tra cứu và hủy lệnh (`removeOrder`) tức thì.
+2. **Khôi Phục Trạng Thái Bền Vững (RAM State Recovery)**:
+   - Bộ nhớ RAM có tính chất dễ mất dữ liệu (volatile) khi restart tiến trình backend.
+   - Để đảm bảo tính bền vững (Durability), khi `MatchingService` khởi động (`onModuleInit`), hàm `restoreRestingOrdersFromDb()` tự động truy vấn các lệnh `PENDING` và `PARTIALLY_FILLED` từ bảng `orders` của PostgreSQL và nạp lại vào RAM theo đúng thứ tự thời gian.
+3. **Phân Rã L2 Orderbook Depth**:
+   - Hàm `getDepth(limit = 20)` gom nhóm toàn bộ khối lượng các lệnh có cùng mức giá thành các `OrderBookLevel` (`price`, `quantity`, `orderCount`), phục vụ vẽ đồ thị độ sâu (Market Depth) và bắn ra Centrifugo.
+
+---
+
+### ADR 18: Khớp Lệnh Lai (P2P Internal Book + Simulated Binance Liquidity) & Hoàn Trả Ký Quỹ Thặng Dư
+
+#### Bối cảnh:
+Dự án là nền tảng Paper-Trading chạy trên dữ liệu thời gian thực của Binance. Sàn cần giải quyết 2 bài toán:
+1. Cho phép người dùng và bot khớp lệnh chéo với nhau (P2P Internal Liquidity).
+2. Khi sổ lệnh nội bộ chưa có lệnh đối ứng, người dùng vẫn phải khớp được lệnh Market hoặc Limit theo giá biến động thật của thế giới (Simulated Market Maker Liquidity).
+
+#### Quyết định kiến trúc:
+1. **Khớp Lệnh Thị Trường (Market Order)**:
+   - Ưu tiên quét sạch các mức giá trong Sổ lệnh nội bộ trước (từ rẻ nhất lên đắt dần đối với BUY, hoặc từ đắt nhất xuống rẻ dần đối với SELL).
+   - Nếu sổ lệnh nội bộ hết hàng (hoặc không đủ khối lượng), phần dư còn lại tự động khớp với giá thị trường mới nhất từ Binance (`CandleAggregatorService.getLatestPrice`).
+2. **Khớp Lệnh Treo Theo Luồng Tick (Tick-Driven Matching)**:
+   - Khi Binance đẩy tick mới qua WebSocket:
+     - Lệnh BUY Limit treo giá $\ge P_{\text{tick}}$: Lập tức được kích hoạt khớp mua.
+     - Lệnh SELL Limit treo giá $\le P_{\text{tick}}$: Lập tức được kích hoạt khớp bán.
+3. **Cơ Chế Hoàn Trả Ký Quỹ Thặng Dư (Price Improvement Refund)**:
+   - **Vấn đề**: User đặt lệnh BUY LIMIT tại giá 65,000 USDT (đã khóa 65,000 USDT), nhưng khi giá thị trường rớt xuống 64,000 USDT, lệnh khớp tại 64,000 USDT (khách hàng được lợi về giá 1,000 USDT).
+   - **Giải pháp**:
+     - `AccountService.settleTrade`: Chi đúng 64,000 USDT từ số dư ký quỹ (`LOCKED`) để nhận 1.0 BTC vào `AVAILABLE`.
+     - `AccountService.unlockBalance`: Tự động hoàn trả 1,000 USDT thặng dư còn lại từ `LOCKED` về lại `AVAILABLE` của người dùng.
+     - **Kết quả**: Số dư ký quỹ được dọn sạch về `0.00000000`, triệt tiêu 100% hiện tượng thất thoát/kẹt tiền (Zero Penny Leakage).
+4. **Quyết toán Sổ Cái Kép Nguyên Tử (Atomic Double-Entry Settlement)**:
+   - Mọi lượt khớp (P2P hoặc Simulated) sinh ra bản ghi `Trade` trong CSDL PostgreSQL.
+   - Cấn trừ đồng thời 2 tài khoản (hoặc 1 tài khoản nếu simulated) trong Database Transaction với Row-Level Lock (`setLock('pessimistic_write')`).
+   - Phát sự kiện miền `trade.executed` lên Topic Exchange `fintrade.events`.
+
+
+
 
 

@@ -24,7 +24,8 @@ export type OrderEventRoutingKey =
   | 'order.queued'
   | 'order.pending'
   | 'order.rejected'
-  | 'order.cancelled';
+  | 'order.cancelled'
+  | 'trade.executed';
 
 export interface OrderDomainEvent {
   event: OrderEventRoutingKey;
@@ -41,6 +42,24 @@ export interface OrderDomainEvent {
   rejectReason?: string | null;
   timestamp: number;
 }
+
+export interface TradeDomainEvent {
+  event: 'trade.executed';
+  tradeId: number;
+  symbol: string;
+  buyOrderId: number | null;
+  sellOrderId: number | null;
+  buyerId: number | null;
+  sellerId: number | null;
+  price: string;
+  quantity: string;
+  quoteAmount: string;
+  takerSide: OrderSideEnum;
+  isSimulatedLiquidity: boolean;
+  timestamp: number;
+}
+
+export type AnyDomainEvent = OrderDomainEvent | TradeDomainEvent;
 
 export interface IdempotencyCacheRecord {
   status: 'PROCESSING' | 'COMPLETED';

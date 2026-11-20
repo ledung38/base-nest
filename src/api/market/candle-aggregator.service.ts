@@ -50,6 +50,16 @@ export class CandleAggregatorService {
     },
   ];
 
+  // Callback listeners khi có tick mới (cho Matching Engine, WebSocket broadcast)
+  private readonly tickListeners: ((tick: MarketTick) => void)[] = [];
+
+  /**
+   * Đăng ký callback nhận luồng tick thời gian thực
+   */
+  onTick(listener: (tick: MarketTick) => void): void {
+    this.tickListeners.push(listener);
+  }
+
   /**
    * Xử lý một tick giá mới nhận được từ Binance/Kafka
    * Cập nhật hoặc đóng nến OHLCV theo thời gian thực
@@ -60,6 +70,15 @@ export class CandleAggregatorService {
   } {
     const symbol = tick.symbol.toUpperCase();
     this.latestTicks.set(symbol, tick);
+
+    // Kích hoạt listeners (Matching Engine, Centrifugo, etc.)
+    for (const listener of this.tickListeners) {
+      try {
+        listener(tick);
+      } catch (err) {
+        // Tránh lỗi listener ảnh hưởng tới luồng gom nến
+      }
+    }
 
     const updatedCandles: Candlestick[] = [];
     const closedCandles: Candlestick[] = [];
