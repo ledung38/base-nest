@@ -53,11 +53,21 @@ export class CandleAggregatorService {
   // Callback listeners khi có tick mới (cho Matching Engine, WebSocket broadcast)
   private readonly tickListeners: ((tick: MarketTick) => void)[] = [];
 
+  // Callback listeners khi có nến mới/đóng nến (cho Centrifugo, TradingView charts)
+  private readonly candleListeners: ((candle: Candlestick, isClosed: boolean) => void)[] = [];
+
   /**
    * Đăng ký callback nhận luồng tick thời gian thực
    */
   onTick(listener: (tick: MarketTick) => void): void {
     this.tickListeners.push(listener);
+  }
+
+  /**
+   * Đăng ký callback nhận nến được cập nhật hoặc đóng nến
+   */
+  onCandle(listener: (candle: Candlestick, isClosed: boolean) => void): void {
+    this.candleListeners.push(listener);
   }
 
   /**
@@ -131,6 +141,27 @@ export class CandleAggregatorService {
         currentCandle.tradesCount += 1;
 
         updatedCandles.push({ ...currentCandle });
+      }
+    }
+
+    // Thông báo cho các listeners về nến đóng và nến cập nhật
+    for (const c of closedCandles) {
+      for (const listener of this.candleListeners) {
+        try {
+          listener(c, true);
+        } catch (err) {
+          // Tránh lỗi listener ảnh hưởng tới tiến trình
+        }
+      }
+    }
+
+    for (const c of updatedCandles) {
+      for (const listener of this.candleListeners) {
+        try {
+          listener(c, false);
+        } catch (err) {
+          // Tránh lỗi listener
+        }
       }
     }
 

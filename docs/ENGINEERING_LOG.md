@@ -461,6 +461,56 @@ Dự án là nền tảng Paper-Trading chạy trên dữ liệu thời gian th�
    - Cấn trừ đồng thời 2 tài khoản (hoặc 1 tài khoản nếu simulated) trong Database Transaction với Row-Level Lock (`setLock('pessimistic_write')`).
    - Phát sự kiện miền `trade.executed` lên Topic Exchange `fintrade.events`.
 
+---
+
+## 8. Pha 6: Realtime Gateway với Centrifugo & Client Throttling (Realtime ADRs)
+
+### ADR 19: Kiến Trúc Dedicated Realtime Gateway với Centrifugo v5
+
+#### Bối cảnh:
+Trong sàn giao dịch tài chính, bảng giá, nến đồ thị và sổ lệnh L2 cập nhật liên tục với tần số cao (hàng chục đến hàng trăm events/giây). Nếu triển khai WebSocket bằng `Socket.io` hoặc `@nestjs/websockets` trực tiếp trong tiến trình Node.js:
+1. **Event Loop Starvation**: Node.js là đơn luồng (Single-Threaded). Việc duy trì hàng nghìn kết nối TCP/TLS, xử lý heartbeat ping/pong và serialization JSON để fan-out broadcast sẽ chiếm dụng Event Loop, làm tăng độ trễ (latency spikes) của Matching Engine và Order Processing.
+2. **Khó Scale Độc Lập**: Mỗi khi scale horizontal WebSocket connections, ta phải scale toàn bộ backend nặng nề kèm DB connection pools.
+
+#### Quyết định kiến trúc: Tách Biệt Realtime Gateway bằng Centrifugo v5 (Go)
+1. **Dấu chân tài nguyên siêu nhẹ**:
+   - Centrifugo được viết bằng Go, sử dụng mô hình Concurrency Go-routines hiệu năng cao.
+   - Dung lượng bộ nhớ chỉ khoảng **~30MB RAM** trên máy chủ cá nhân, gánh hàng chục nghìn kết nối đồng thời dễ dàng.
+2. **Giao tiếp Decoupled qua HTTP API**:
+   - Backend NestJS không duy trì socket kết nối với client. NestJS chỉ đóng vai trò Publisher, bắn tin nhắn qua HTTP POST `/api/publish` hoặc `/api/broadcast` tới Centrifugo qua mạng nội bộ Docker (`http://localhost:8001/api`).
+3. **Cấu Trúc Phân Tách Namespaces (`centrifugo.json`)**:
+   - **Namespace `public`**: Kênh dữ liệu thị trường công khai không yêu cầu xác thực (`allow_subscribe_for_client: true`).
+     - `public:ticks:<symbol>`: Luồng tick giá trực tiếp từ Binance.
+     - `public:orderbook:<symbol>`: Độ sâu sổ lệnh L2 (Top 20 bids/asks).
+     - `public:trades:<symbol>`: Băng chuyền các lệnh khớp công khai (Public Trades Tape).
+     - `public:candles:<symbol>:<interval>`: Dữ liệu nến đóng/mở phục vụ TradingView Lightweight Charts.
+   - **Namespace `personal`**: Kênh thông tin tài khoản riêng tư (`presence: false`).
+     - `personal:<user_id>`: Nhận biến động lệnh cá nhân (`ORDER_UPDATE`) và kết quả khớp lệnh (`TRADE_EXECUTED`).
+4. **Bảo Mật với HMAC-SHA256 JWT Tokens**:
+   - `Connection Token`: Cấp cho client mở kết nối WebSocket an toàn tới Centrifugo.
+   - `Subscription Token`: Kiểm soát quyền đăng ký kênh riêng tư `personal:<user_id>`, ngăn chặn người dùng xem trộm lệnh của người khác.
+
+---
+
+### ADR 20: Kiểm Soát Áp Lực Ngược Phía Client (Client-Side Backpressure) bằng Leading + Trailing Edge Orderbook Throttling
+
+#### Bối cảnh:
+Khi thị trường tài chính biến động mạnh (như khi tin tức ra hoặc giá biến động lớn), Binance WebSocket và Matching Engine có thể đẩy ra 50 đến 100 cập nhật sổ lệnh mỗi giây. Nếu phát toàn bộ 100 updates/giây này qua WebSocket tới trình duyệt của người dùng:
+1. Trình duyệt Next.js/React sẽ bị nghẽn luồng DOM rendering (CPU 100%, giật lag, drop frame xuống dưới 10fps).
+2. Lãng phí băng thông mạng vì mắt người chỉ có thể theo dõi biến động ở tần số tối đa 10-15 lần/giây.
+
+#### Quyết định kiến trúc: Bộ Lọc Throttler (Leading + Trailing Edge) 100ms
+1. **Thuật toán Coalescing Snapshot**:
+   - Cửa sổ thời gian điều tiết: **100ms** (tương đương tối đa 10 updates/giây cho mỗi cặp coin).
+   - **Leading Edge (Không độ trễ)**: Khi có biến động đầu tiên sau một khoảng im ắng, phát snapshot độ sâu sổ lệnh ngay lập tức ($0\text{ms}$ delay).
+   - **Trailing Edge (Gộp dữ liệu)**: Mọi biến động dồn dập kế tiếp trong cửa sổ 100ms sẽ không bắn lẻ tẻ từng đợt, mà được gộp lại. Khi đồng hồ 100ms kết thúc, chỉ duy nhất 1 bản chụp sổ lệnh (L2 Depth Snapshot) mới nhất được phát đi.
+2. **Phân Lập Theo Từng Cặp Coin (Symbol Isolation)**:
+   - Throttler quản lý timer độc lập cho từng symbol (`BTCUSDT`, `ETHUSDT`, `SOLUSDT`). Sự dồn dập của BTC hoàn toàn không làm trễ lịch cập nhật của ETH hay SOL.
+3. **Hiệu Quả**:
+   - Giảm tải **~85-90% lượng message truyền qua mạng** trong các đợt bão biến động giá.
+   - Giao diện người dùng Next.js render mượt mà ở mức 60fps chuẩn xác.
+
+
 
 
 

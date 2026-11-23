@@ -1,8 +1,8 @@
 # 📋 Báo Cáo Bàn Giao & Trạng Thái Dự Án (Project Handover)
 ## FinTrade Backend: High-Throughput Algorithmic Trading & Paper-Trading Engine
 
-> **Ngày cập nhật**: 19/11/2026  
-> **Trạng thái tổng thể**: Đã hoàn thành **Pha 1, Pha 2, Pha 3, Pha 4, Pha 5** và toàn bộ tài liệu kỹ thuật. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (**46/46 tests pass**). Sẵn sàng bắt đầu **Pha 6 (Centrifugo Realtime Gateway)**.
+> **Ngày cập nhật**: 23/11/2026  
+> **Trạng thái tổng thể**: Đã hoàn thành **Pha 1, Pha 2, Pha 3, Pha 4, Pha 5, Pha 6** và toàn bộ tài liệu kỹ thuật. Hệ thống biên dịch sạch (`build: 0 error`), toàn bộ unit test đạt 100% (**60/60 tests pass**). Sẵn sàng bắt đầu **Pha 7 (Automated Trading Bot)**.
 
 ---
 
@@ -16,8 +16,8 @@
 | **Pha 3: Market Data & Kafka** | ✅ Hoàn tất | Ingestion Binance WebSocket, Dedicated Partition Mapping cho Kafka (`BTCUSDT: 0`, `ETHUSDT: 1`, `SOLUSDT: 2`), In-memory Rolling Candle (12/12 tests pass) |
 | **Pha 4: Order & RabbitMQ** | ✅ Hoàn tất | Entity `Order` + Migration, Redis + DB Idempotency 2 tầng, RabbitMQ (Publisher Confirms, Manual Ack, DLX/DLQ), Worker khóa tiền & Hủy lệnh (13/13 tests pass) |
 | **Pha 5: Matching Engine** | ✅ Hoàn tất | In-Memory Orderbook (Price-Time Priority), Khớp lệnh lai (P2P + Simulated Binance Liquidity), Hoàn trả ký quỹ thặng dư (Price Improvement), Quyết toán sổ cái kép (13/13 tests pass) |
-| **Pha 6: Centrifugo Gateway** | ⏳ **Sẵn sàng triển khai** | Broadcast tick, depth L2 và sự kiện khớp lệnh `trade.executed` ra frontend Next.js |
-| **Pha 7: Trading Bot** | ⏳ Kế hoạch | Bot Grid Trading & Chiến thuật EMA Cross |
+| **Pha 6: Centrifugo Gateway** | ✅ Hoàn tất | Realtime Gateway với Centrifugo, HMAC-SHA256 JWT auth, Leading + Trailing Edge 100ms Depth Throttling, multi-channel broadcast (14/14 tests pass) |
+| **Pha 7: Trading Bot** | ⏳ **Sẵn sàng triển khai** | Bot Grid Trading & Chiến thuật EMA Cross |
 | **Pha 8: K3s Deployment** | ⏳ Kế hoạch | Dockerfile multi-stage, K3s manifests, tối ưu RAM $\le$ 8GB |
 
 ---
@@ -59,30 +59,31 @@
 
 ## 3. Các Bước Tiếp Theo Cần Triển Khai (Next Steps)
 
-### 👉 Nhiệm vụ sắp tới: **Pha 6 - Realtime Gateway với Centrifugo & Client Throttling**
-1. **Centrifugo Service / Client**:
-   - Sử dụng Centrifugo HTTP API (port 8001) để publish dữ liệu ra các channels.
-   - Quản lý JWT Subscription Token HMAC-SHA256 cho người dùng subscribe kênh cá nhân (`personal:user_id`).
-2. **Channel Namespaces (`centrifugo.json`)**:
-   - `public:ticks:<symbol>`: Bắn tick giá Binance thời gian thực.
-   - `public:orderbook:<symbol>`: Bắn L2 Orderbook Depth (throttling 100ms bảo vệ DOM UI).
-   - `public:trades:<symbol>`: Bắn các giao dịch vừa khớp trên thị trường.
-   - `personal:<user_id>`: Bắn biến động số dư và trạng thái lệnh của riêng từng user.
-3. **Consumer lắng nghe Domain Events**:
-   - Lắng nghe `trade.executed`, `order.pending`, `order.cancelled` từ RabbitMQ exchange `fintrade.events` để chuyển tiếp tức thì sang Centrifugo.
+### 👉 Nhiệm vụ sắp tới: **Pha 7 - Automated Trading Bot (Grid Trading & Alpha Signal EMA Cross)**
+1. **Thiết kế Entity `BotConfig`**:
+   - Quản lý cấu hình bot của người dùng trong PostgreSQL (`bot_type`, `symbol`, `grid_levels`, `lower_bound`, `upper_bound`, `is_active`).
+2. **Chiến lược Grid Trading Worker**:
+   - Tự động rải lưới các lệnh BUY limit và SELL limit cách đều khoảng giá khi khởi động.
+   - Khi một mức lưới BUY được khớp $\rightarrow$ Tự động sinh lệnh SELL đối ứng ở mức lưới trên liền kề (Buy low, Sell high).
+3. **Chiến lược EMA Cross Signal (9/21)**:
+   - Tính toán đường EMA ngắn hạn (9 nến) và dài hạn (21 nến) từ `CandleAggregatorService`.
+   - Sinh tín hiệu mua/bán tự động và đẩy lệnh vào hàng đợi RabbitMQ `orders.queue`.
+4. **Dashboard REST APIs**:
+   - Bật/tắt bot, xem thống kê hiệu suất PnL (Realized/Unrealized PnL).
 
 ---
 
 ## 4. Lệnh Kiểm Tra Nhanh Hệ Thống (Quick Health Checks)
 
 ```bash
-# 1. Chạy toàn bộ Unit Tests (hiện có 46/46 tests PASS - 6 test suites)
+# 1. Chạy toàn bộ Unit Tests (hiện có 60/60 tests PASS - 9 test suites)
 npm.cmd run test
 
 # 2. Kiểm tra biên dịch TypeScript
 npm.cmd run build
 
 # 3. Chạy test riêng từng service
+npm.cmd run test -- realtime
 npm.cmd run test -- orderbook.spec.ts
 npm.cmd run test -- matching.service.spec.ts
 npm.cmd run test -- order.service.spec.ts
@@ -94,9 +95,6 @@ npm.cmd run test -- market-kafka.service.spec.ts
 docker-compose -f docker-compose-dev.yml up -d
 
 # 5. Chạy dev server
-npm.cmd run start:dev
-# Swagger UI: http://localhost:8000/api-docs
-```
 npm.cmd run start:dev
 # Swagger UI: http://localhost:8000/api-docs
 ```
