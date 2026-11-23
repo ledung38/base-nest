@@ -510,6 +510,89 @@ Khi thị trường tài chính biến động mạnh (như khi tin tức ra ho�
    - Giảm tải **~85-90% lượng message truyền qua mạng** trong các đợt bão biến động giá.
    - Giao diện người dùng Next.js render mượt mà ở mức 60fps chuẩn xác.
 
+---
+
+## 9. Pha 7: Automated Trading Bot Engine (Trading Bot ADRs)
+
+### ADR 21: Kiến Trúc Grid Trading Worker & Counterpart Rebalancing (Tự Động Tái Cân Bằng Lưới Đa Tầng)
+
+#### Bối cảnh:
+Trong thị trường Crypto hoặc ngoại hối, giá thường xuyên dao động đi ngang trong một biên độ nhất định (Sideway/Range-bound Market) chiếm đến 70% thời gian. Chiến lược **Grid Trading (Giao dịch lưới)** tận dụng đặc tính này bằng cách chia dải giá thành nhiều tầng đều nhau, đặt lệnh mua ở các mức giá thấp và bán ở các mức giá cao để thu về lợi nhuận vi mô (Micro-profits) liên tục từ biến động thị trường.
+Thách thức kỹ thuật đặt ra:
+1. **Quản lý trạng thái đa tầng (Multi-level State Tracking)**: Khi rải 5-20 mức giá, làm thế nào để theo dõi lệnh nào thuộc tầng nào, lệnh nào đã khớp, và lệnh đối ứng tương ứng là gì?
+2. **Tự động tái cân bằng (Automatic Counterpart Order Rebalancing)**: Khi một lệnh BUY khớp, hệ thống phải tự động sinh lệnh SELL chốt lời ở tầng trên liền kề; khi lệnh SELL khớp, phải đặt lại lệnh BUY ở tầng dưới để tiếp tục chu kỳ.
+3. **Độ chính xác tài chính**: Toàn bộ tính toán khoảng cách lưới (Grid Step), số lượng coin trên mỗi tầng, giá đặt lệnh và PnL thực nhận (`realizedPnl`) phải tuyệt đối chính xác, không được sai lệch số thập phân.
+
+#### Quyết định kiến trúc:
+1. **Tính toán Lưới Số Học Chuẩn (Arithmetic Grid Calculation)**:
+   - Khoảng cách giữa các tầng lưới:
+     $$\text{step} = \frac{\text{upperBound} - \text{lowerBound}}{\text{gridLevels} - 1}$$
+   - Mức giá tầng thứ $i$ ($0 \le i < \text{gridLevels}$):
+     $$P_i = \text{lowerBound} + i \times \text{step}$$
+   - Khối lượng trên mỗi tầng:
+     $$Q_i = \frac{\text{investmentAmount}}{\text{gridLevels} \times P_i}$$
+   - Toàn bộ tính toán được thực hiện bằng `bignumber.js` và làm tròn chuẩn 8 chữ số thập phân (`toFixed(8)`).
+2. **Khởi tạo Lưới Dựa Trên Giá Thị Trường (Market-Aware Initial Placement)**:
+   - Lấy giá thị trường hiện tại $P_{\text{current}}$ từ `MarketKafkaService` hoặc `CandleAggregatorService`.
+   - Với mọi tầng $i$ có $P_i < P_{\text{current}}$: Đặt lệnh `LIMIT BUY` với giá $P_i$.
+   - Các tầng có $P_i \ge P_{\text{current}}$: Để trống, sẵn sàng làm tầng chốt lời khi các lệnh BUY bên dưới khớp.
+3. **Cơ Chế Khớp & Sinh Lệnh Đối Ứng (Counterpart Execution Loop)**:
+   - Worker lắng nghe sự kiện `trade.executed` từ `MatchingService` thông qua EventEmitter hoặc RabbitMQ.
+   - Khi phát hiện một lệnh của bot được khớp:
+     - **Nếu lệnh BUY ở tầng $i$ khớp**:
+       - Tầng $i$ chuyển trạng thái thành `FILLED`.
+       - Ngay lập tức đặt một lệnh `LIMIT SELL` đối ứng ở tầng $i+1$ với giá $P_{i+1}$ và khối lượng $Q_i$.
+       - Lợi nhuận dự kiến khóa được: $\Delta P \times Q_i = (P_{i+1} - P_i) \times Q_i$.
+     - **Nếu lệnh SELL ở tầng $j$ khớp**:
+       - Tầng $j$ chuyển trạng thái thành `FILLED`.
+       - Đặt lại lệnh `LIMIT BUY` ở tầng $j-1$ với giá $P_{j-1}$ để duy trì lưới liên tục.
+       - Cộng dồn lợi nhuận thực tế:
+         $$\text{profit} = (P_j - P_{j-1}) \times Q_{j-1}$$
+         $$\text{realizedPnl} \leftarrow \text{realizedPnl} + \text{profit}$$
+       - Tăng biến đếm `totalTrades` và cập nhật bản ghi `BotConfig` trong cơ sở dữ liệu.
+4. **Idempotency & Khôi phục Sau Sự Cố (Crash Recovery)**:
+   - Mỗi lệnh sinh ra từ bot mang `Idempotency-Key` có định dạng duy nhất: `bot_<botId>_grid_<levelIndex>_<orderSide>_<timestamp>`.
+   - Khi tiến trình NestJS khởi động lại (`onApplicationBootstrap`), `BotService.restoreActiveBots()` quét tất cả các bot có trạng thái `is_active = true` trong database và tự động tái lập các worker tương ứng.
+
+---
+
+### ADR 22: Chiến Lược Tín Hiệu Alpha EMA Cross (9/21) Trên Nến Đóng (Closed Candle Evaluation)
+
+#### Bối cảnh:
+Chiến lược giao dịch theo xu hướng (Trend Following) dựa trên giao cắt đường trung bình động hàm mũ (Exponential Moving Average - EMA) là một trong những thuật toán cơ bản và phổ biến nhất trong giao dịch định lượng:
+- **EMA Ngắn Hạn (EMA 9)**: Phản ứng nhanh với biến động giá gần nhất.
+- **EMA Dài Hạn (EMA 21)**: Thể hiện xu hướng chủ đạo trung hạn của thị trường.
+- **Tín hiệu**:
+  - **Golden Cross (Giao cắt vàng)**: EMA 9 cắt vượt lên trên EMA 21 $\rightarrow$ Xu hướng tăng giá (Bullish) $\rightarrow$ Đặt lệnh Mua (BUY).
+  - **Death Cross (Giao cắt tử thần)**: EMA 9 cắt rơi xuống dưới EMA 21 $\rightarrow$ Xu hướng giảm giá (Bearish) $\rightarrow$ Đặt lệnh Bán (SELL).
+
+Tuy nhiên, trong môi trường streaming tần số cao với hàng trăm tick giá/giây:
+- **Vấn đề Whipsaw (Bẫy Tín Hiệu Giả Trong Phiên)**: Khi một cây nến chưa đóng, giá dao động giật lên giật xuống liên tục. Nếu bot đánh giá EMA trên từng tick, nó sẽ phát tín hiệu mua/bán hàng chục lần trong vòng 1 phút, dẫn đến việc liên tục mở và đóng vị thế ở mức giá xấu, chịu phí giao dịch khổng lồ và bào mòn toàn bộ vốn.
+
+#### Quyết định kiến trúc:
+1. **Chỉ Đánh Giá Tín Hiệu Trên Cây Nến Đã Đóng (`isClosed === true`)**:
+   - `EmaCrossWorker` đăng ký lắng nghe sự kiện `onCandle` từ `CandleAggregatorService`.
+   - Bỏ qua mọi cập nhật nến trung gian (`isClosed === false`).
+   - Chỉ khi nến 1 phút chính thức hoàn tất và đóng nến, giá đóng cửa (`closePrice`) mới được chốt để đưa vào mảng dữ liệu tính toán chỉ báo.
+   - **Lợi ích**: Loại trừ 100% hiện tượng Whipsaw trong phiên, đảm bảo tín hiệu giao dịch có tính ổn định và xác nhận cao.
+2. **Thuật Toán Tính EMA Thuần Túy Bằng `BigNumber.js`**:
+   - Hệ số nhân trọng số (Multiplier):
+     $$\alpha = \frac{2}{N + 1}$$
+     Với $N = 9 \rightarrow \alpha_9 = \frac{2}{10} = 0.2$. Với $N = 21 \rightarrow \alpha_{21} = \frac{2}{22} \approx 0.09090909$.
+   - Công thức đệ quy:
+     $$\text{EMA}_t = (P_{\text{close}} - \text{EMA}_{t-1}) \times \alpha + \text{EMA}_{t-1}$$
+   - Mọi phép nhân, chia, cộng, trừ thực hiện bằng `BigNumber.js`, giá trị khởi tạo ban đầu $\text{EMA}_0$ lấy từ trung bình cộng đơn giản (SMA) của $N$ nến đầu tiên.
+3. **Phát Hiện Điểm Giao Cắt Liên Tiếp (State-Aware Cross Detection)**:
+   - Để xác định chính xác thời điểm giao cắt (Cross Moment), thuật toán so sánh vị thế của 2 nến gần nhất:
+     - **Golden Cross**: $\text{EMA}_{9, \text{prev}} \le \text{EMA}_{21, \text{prev}}$ VÀ $\text{EMA}_{9, \text{curr}} > \text{EMA}_{21, \text{curr}}$.
+     - **Death Cross**: $\text{EMA}_{9, \text{prev}} \ge \text{EMA}_{21, \text{prev}}$ VÀ $\text{EMA}_{9, \text{curr}} < \text{EMA}_{21, \text{curr}}$.
+   - Kết hợp biến trạng thái `lastSignal` (`BUY` | `SELL` | `NONE`):
+     - Nếu tín hiệu mới trùng với `lastSignal`, worker sẽ bỏ qua không đặt lệnh lặp lại (Signal Debouncing / Cooldown).
+4. **Thực Thi Lệnh Thị Trường Tin Cậy (Market Order Execution)**:
+   - Khi có tín hiệu hợp lệ, worker sinh lệnh `MARKET BUY` hoặc `MARKET SELL` qua `OrderService.createOrder`.
+   - Lệnh được đưa vào RabbitMQ `orders.queue` với cờ idempotency tự sinh, đảm bảo không bao giờ bị nghẽn thread xử lý của event loop.
+
+
 
 
 

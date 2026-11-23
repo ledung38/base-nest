@@ -11,6 +11,7 @@ import { MarketModule } from './api/market/market.module';
 import { OrderModule } from './api/order/order.module';
 import { MatchingModule } from './api/matching/matching.module';
 import { RealtimeModule } from './api/realtime/realtime.module';
+import { BotModule } from './api/bot/bot.module';
 import { AppController } from './app.controller';
 import { AuthModule } from './auth/auth.module';
 import { TypeOrmConfigService, dataSourceFactory } from './config/database.config';
@@ -45,6 +46,7 @@ import { RequestLogMiddleware } from './middleware/request-log.middleware';
     OrderModule,
     MatchingModule,
     RealtimeModule,
+    BotModule,
   ],
   controllers: [AppController],
   providers: [],
