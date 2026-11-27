@@ -8,7 +8,7 @@ import {
 
 export class CreateBotDto {
   @IsSwaggerString({
-    default: 'BTC Alpha Grid Bot',
+    default: 'BTC Alpha Confluence 5m',
     description: 'Tên định danh của bot thuật toán',
   })
   @IsNotEmpty()
@@ -16,8 +16,9 @@ export class CreateBotDto {
 
   @IsSwaggerEnum({
     enum: BotTypeEnum,
-    default: BotTypeEnum.GRID_TRADING,
-    description: 'Loại chiến lược thuật toán (GRID_TRADING hoặc EMA_CROSS)',
+    default: BotTypeEnum.ALPHA_SIGNAL,
+    description:
+      'Loại chiến lược (GRID_TRADING hoặc ALPHA_SIGNAL nhận từ Python Quant Worker)',
   })
   botType: BotTypeEnum;
 

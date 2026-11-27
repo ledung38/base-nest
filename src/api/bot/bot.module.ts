@@ -5,7 +5,7 @@ import { OrderModule } from 'src/api/order/order.module';
 import { BotConfig } from 'src/entities/bot-config.entity';
 import { BotController } from './bot.controller';
 import { BotService } from './bot.service';
-import { EmaCrossWorker } from './workers/ema-cross.worker';
+import { SignalConsumerService } from './signal-consumer.service';
 import { GridTradingWorker } from './workers/grid-trading.worker';
 
 @Module({
@@ -15,7 +15,7 @@ import { GridTradingWorker } from './workers/grid-trading.worker';
     MarketModule,
   ],
   controllers: [BotController],
-  providers: [BotService, GridTradingWorker, EmaCrossWorker],
-  exports: [BotService, GridTradingWorker, EmaCrossWorker],
+  providers: [BotService, GridTradingWorker, SignalConsumerService],
+  exports: [BotService, GridTradingWorker, SignalConsumerService],
 })
 export class BotModule {}

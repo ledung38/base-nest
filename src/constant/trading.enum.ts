@@ -46,6 +46,6 @@ export enum OrderStatusEnum {
 
 export enum BotTypeEnum {
   GRID_TRADING = 'GRID_TRADING',
-  EMA_CROSS = 'EMA_CROSS',
+  ALPHA_SIGNAL = 'ALPHA_SIGNAL',
 }
 

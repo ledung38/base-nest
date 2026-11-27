@@ -592,6 +592,52 @@ Tuy nhiên, trong môi trường streaming tần số cao với hàng trăm tick
    - Khi có tín hiệu hợp lệ, worker sinh lệnh `MARKET BUY` hoặc `MARKET SELL` qua `OrderService.createOrder`.
    - Lệnh được đưa vào RabbitMQ `orders.queue` với cờ idempotency tự sinh, đảm bảo không bao giờ bị nghẽn thread xử lý của event loop.
 
+> [!NOTE]
+> **Cập nhật (Superseded by ADR 23 & ADR 24)**: Triển khai chỉ báo EMA trong TypeScript ở ADR 22 đã được hủy bỏ và thay thế bằng kiến trúc tách biệt **Quant Plane (`quant-worker/` Python + TA-Lib)** và **Execution Plane (NestJS `SignalConsumerService`)** cùng kho nến chuẩn Binance 3 tầng để đồng bộ 100% với hệ thống backtest thực tế.
+
+---
+
+### ADR 23: Lưu Trữ Nến Đa Khung Thời Gian 3 Tầng (Binance Klines + RAM Ring Buffer + PostgreSQL + Kafka)
+
+#### Bối cảnh:
+1. Hệ thống backtest của đội ngũ Quant sử dụng dữ liệu nến chuẩn từ **Binance Spot API (`GET /api/v3/klines`)** trên nhiều khung thời gian (`1m`, `5m`, `15m`, `1h`, `1d`) kết hợp đa chỉ báo phức tạp (`EMA(20)`, `EMA(100)`, `HMA(14)`, `MACD`, `RSI`, `Volume SMA`, `ATR(14)`).
+2. Cách làm cũ tự gom nến `1m/15m` từ luồng `@trade` trong RAM có 3 hạn chế nghiêm trọng:
+   - Mất dữ liệu khi app restart hoặc bị lỗ hổng khi WebSocket rớt vài giây $\rightarrow$ lệch OHLCV so với backtest.
+   - Cold-start phải chờ hàng giờ mới tích lũy đủ nến để tính `EMA(100)`.
+   - `getCandles()` gộp cả nến đang chạy (chưa đóng) vào mảng tính chỉ báo $\rightarrow$ gây sai lệch trực tiếp so với backtest.
+
+#### Quyết định kiến trúc:
+1. **Nguồn dữ liệu nến chính chủ từ Binance**:
+   - Chỉ giữ lại gom nến `1s` từ `@trade` trong `CandleAggregatorService` phục vụ biểu đồ realtime UI.
+   - Toàn bộ 5 khung chuẩn (`1m`, `5m`, `15m`, `1h`, `1d`) subscribe trực tiếp combined stream `@kline_<interval>` (18 streams chung 1 kết nối WS, giới hạn Binance là 1024 streams).
+   - **Chỉ lưu trữ và phát sự kiện phân tích khi `k.x === true`** (nến đã chính thức chốt).
+2. **Kiến trúc lưu trữ 3 tầng (không cần thêm Redis cho nến)**:
+   - **Tầng 1 — PostgreSQL (`market_candle`)**: Nguồn sự thật bền vững, khóa chính phức hợp `(symbol, interval, open_time)`, các cột OHLCV kiểu `numeric(28, 8)`. Tải ghi cực nhỏ (~4 dòng/phút cho 3 symbol × 5 khung), hoàn toàn không vi phạm quy tắc cấm ghi raw tick.
+   - **Tầng 2 — RAM Ring Buffer (`CandleStoreService`)**: Giữ **1000 nến chốt** gần nhất cho mỗi `(symbol, interval)` (~5MB RAM tổng), đọc $O(1)$ phục vụ warm-up cho `quant-worker` qua `GET /api/market/klines`.
+   - **Tầng 3 — Apache Kafka (`market.candles`)**: Bắn nến chốt ngay trên hot-path (song song với ghi Postgres) để `quant-worker` tiêu thụ thời gian thực và hỗ trợ replay theo offset.
+3. **Warm-up 1000 nến & Vá lỗ hổng tự động (`KlineBackfillService`)**:
+   - Với `EMA(100)`, hệ số $\alpha = 2/101 \approx 0.0198$. Ảnh hưởng của điểm khởi tạo sau $N = 1000$ nến là $(1 - \alpha)^{1000} \approx 2.5 \times 10^{-9}$ $\rightarrow$ hội tụ gần như tuyệt đối với backtest, và vừa trọn **1 request REST (`limit=1000`, weight=2)**.
+   - Khi khởi động hoặc sau mỗi lần WebSocket reconnect, `KlineBackfillService` tự động so sánh `MAX(open_time)` trong DB với hiện tại và gọi `BinanceRestService.fetchKlinesRange()` (kèm backoff 429/418 & theo dõi `X-MBX-USED-WEIGHT-1M`) để vá toàn bộ nến bị thiếu.
+
+---
+
+### ADR 24: Tách Biệt Quant Plane (Python `quant-worker` Độc Lập) & Execution Plane (NestJS `SignalConsumerService`)
+
+#### Bối cảnh:
+Viết lại các tổ hợp chỉ báo (`TA-Lib`: `EMA`, `WMA/HMA`, `MACD`, `RSI`, `ATR`) từ Python sang TypeScript vừa tốn công bảo trì 2 bản mã nguồn, vừa tạo ra rủi ro lệch số học (Quant-to-Execution Parity Gap) khiến lệnh live khác với kết quả backtest.
+
+#### Quyết định kiến trúc:
+1. **Hủy bỏ bộ tính chỉ báo trong NestJS**: Xóa `src/api/bot/indicators/ema.ts` và `ema-cross.worker.ts`; chuyển `BotTypeEnum.EMA_CROSS` thành `BotTypeEnum.ALPHA_SIGNAL` (migration `1750000000000-create-market-candle-and-alpha-bot.ts`). Giữ nguyên `GridTradingWorker`.
+2. **Thư mục `quant-worker/` Python chạy hoàn toàn độc lập**:
+   - Không phụ thuộc mã nguồn NestJS; có thể chạy riêng hoặc copy trực tiếp sang repo backtest.
+   - Luồng hoạt động: Warm-up 1000 nến chốt từ `GET /api/market/klines` $\rightarrow$ Consume nến chốt từ Kafka `market.candles` $\rightarrow$ Chạy nguyên vẹn công thức TA-Lib (`AlphaConfluenceStrategy`) $\rightarrow$ Khi ra `1` (BUY) hoặc `-1` (SELL), publish sang RabbitMQ durable queue `trading.signals` (kèm DLX `signals.dlx` / DLQ `trading.signals.dlq`).
+3. **Hợp đồng tín hiệu & Bảo vệ phía NestJS (`SignalConsumerService`)**:
+   - **Tách trách nhiệm tài chính**: Python chỉ quyết định hướng (`1` / `-1` / `0`); NestJS chịu trách nhiệm khối lượng, kiểm tra số dư, khóa tiền (`SELECT FOR UPDATE`), Sổ cái kép và khớp lệnh bằng `BigNumber.js`.
+   - **Idempotency xác định trước**: `signalId = "{strategyCode}:{symbol}:{interval}:{candleOpenTime}"` được băm thành `sig-{botId}-{sha256[:24]}` ($\le 64$ ký tự) làm `Idempotency-Key` cho `OrderService.createOrder`, chống đặt trùng lệnh tuyệt đối khi retry/replay.
+   - **Chặn tín hiệu cũ (Staleness Guard)**: Tự động bỏ qua tín hiệu có `now - candleCloseTime > maxStalenessMs` (mặc định 15s cho `1m`, 30s cho `5m`, ...) tránh xả lệnh cũ sau sự cố mạng.
+   - **Cô lập lỗi theo từng bot**: Lỗi nghiệp vụ của 1 user (vd thiếu số dư) được log & bỏ qua riêng bot đó, không NACK làm độc queue của các bot khác.
+
+
 
 
 

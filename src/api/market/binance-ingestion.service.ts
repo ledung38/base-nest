@@ -7,8 +7,15 @@ import {
 import { ENV } from 'src/config/environment';
 import { RawData, WebSocket } from 'ws';
 import { CandleAggregatorService } from './candle-aggregator.service';
+import { CandleStoreService } from './candle-store.service';
+import { KlineBackfillService } from './kline-backfill.service';
 import { MarketKafkaService } from './market-kafka.service';
-import { MarketTick } from './market.interface';
+import {
+  Candlestick,
+  KLINE_INTERVALS,
+  KlineInterval,
+  MarketTick,
+} from './market.interface';
 
 @Injectable()
 export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
@@ -16,16 +23,26 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   private ws: WebSocket | null = null;
   private isDestroyed = false;
   private reconnectAttempts = 0;
+  private hasConnectedOnce = false;
   private reconnectTimer: NodeJS.Timeout | null = null;
 
-  // Thống kê metrics phục vụ giám sát và phỏng vấn
+  // Metrics giám sát pipeline & đo độ trễ thực tế (receivedAt - k.T)
   private ticksReceived = 0;
+  private klinesReceived = 0;
+  private closedKlinesReceived = 0;
   private lastTickTimestamp: number | null = null;
-  private connectionStatus: 'CONNECTED' | 'CONNECTING' | 'RECONNECTING' | 'DISCONNECTED' =
-    'DISCONNECTED';
+  private lastKlineLatencyMs: number | null = null;
+  private totalKlineLatencyMs = 0;
+  private connectionStatus:
+    | 'CONNECTED'
+    | 'CONNECTING'
+    | 'RECONNECTING'
+    | 'DISCONNECTED' = 'DISCONNECTED';
 
   constructor(
     private readonly candleAggregator: CandleAggregatorService,
+    private readonly candleStore: CandleStoreService,
+    private readonly klineBackfill: KlineBackfillService,
     private readonly kafkaService: MarketKafkaService,
   ) {}
 
@@ -42,29 +59,60 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Khởi tạo kết nối WebSocket tới Binance Public Stream API
+   * Danh sách combined streams: @trade cho mọi symbol + @kline_<interval> cho mọi (symbol, interval).
+   * Ví dụ: 3 symbol × (1 trade + 5 kline) = 18 streams (giới hạn Binance: 1024 streams/kết nối).
+   */
+  buildSubscribedStreams(): string[] {
+    const symbols = ENV.BINANCE.SYMBOLS.map((s) => s.toLowerCase());
+    const intervals = this.klineBackfill.getConfiguredIntervals();
+    const streams: string[] = [];
+
+    for (const sym of symbols) {
+      streams.push(`${sym}@trade`);
+      for (const interval of intervals) {
+        streams.push(`${sym}@kline_${interval}`);
+      }
+    }
+
+    return streams;
+  }
+
+  /**
+   * Khởi tạo kết nối WebSocket tới Binance Combined Stream API
    */
   connect() {
     if (this.isDestroyed) return;
 
-    this.connectionStatus = this.reconnectAttempts > 0 ? 'RECONNECTING' : 'CONNECTING';
+    const isReconnect = this.hasConnectedOnce || this.reconnectAttempts > 0;
+    this.connectionStatus = isReconnect ? 'RECONNECTING' : 'CONNECTING';
 
-    const streams = ENV.BINANCE.SYMBOLS.map(
-      (s) => `${s.toLowerCase()}@trade`,
-    ).join('/');
-    const url = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+    const streams = this.buildSubscribedStreams();
+    const url = `wss://stream.binance.com:9443/stream?streams=${streams.join('/')}`;
 
-    this.logger.log(`Connecting to Binance WebSocket: ${url}`);
+    this.logger.log(
+      `Connecting to Binance WebSocket (${streams.length} streams: trade + klines [${this.klineBackfill.getConfiguredIntervals().join(', ')}])`,
+    );
 
     try {
       this.ws = new WebSocket(url);
 
       this.ws.on('open', () => {
+        const shouldBackfillGap = this.hasConnectedOnce;
+        this.hasConnectedOnce = true;
         this.connectionStatus = 'CONNECTED';
         this.reconnectAttempts = 0;
         this.logger.log(
-          `Binance WebSocket Connected successfully! Subscribed to [${ENV.BINANCE.SYMBOLS.join(', ')}]`,
+          `Binance WebSocket Connected! Subscribed to [${ENV.BINANCE.SYMBOLS.join(', ')}] × [${this.klineBackfill.getConfiguredIntervals().join(', ')}]`,
         );
+
+        // Nếu vừa kết nối lại sau khi rớt mạng -> vá lỗ hổng nến bị thiếu từ REST
+        if (shouldBackfillGap) {
+          void this.klineBackfill.backfillGapsAll().catch((err) => {
+            this.logger.warn(
+              `Reconnect gap backfill error: ${(err as Error).message}`,
+            );
+          });
+        }
       });
 
       this.ws.on('message', (rawData: RawData) => {
@@ -93,15 +141,16 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Xử lý gói tin trade stream từ Binance
+   * Xử lý gói tin @trade và @kline_<interval> từ Binance Combined Stream
    */
-  private handleMessage(rawData: RawData) {
+  handleMessage(rawData: RawData) {
     try {
       const parsed = JSON.parse(rawData.toString());
-      const data = parsed.data;
+      const data = parsed.data ?? parsed;
+      if (!data) return;
 
-      // Binance trade payload: e = 'trade'
-      if (data && data.e === 'trade') {
+      // 1. Luồng khớp lệnh trực tiếp (@trade)
+      if (data.e === 'trade') {
         const tick: MarketTick = {
           symbol: data.s,
           price: data.p,
@@ -114,15 +163,55 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
         this.ticksReceived += 1;
         this.lastTickTimestamp = tick.timestamp;
 
-        // 1. Cập nhật In-memory Candle Aggregator
-        const { closedCandles } = this.candleAggregator.processTick(tick);
+        // Gom nến 1s cho UI + kích hoạt listeners (Matching Engine, Centrifugo)
+        this.candleAggregator.processTick(tick);
 
-        // 2. Bắn tick vào Apache Kafka (partitioned by symbol)
-        this.kafkaService.sendTick(tick);
+        // Bắn tick vào Apache Kafka (dedicated partition by symbol)
+        void this.kafkaService.sendTick(tick);
+        return;
+      }
 
-        // 3. Nếu có nến vừa hoàn thành, bắn vào Kafka topic 'market.candles'
-        for (const candle of closedCandles) {
-          this.kafkaService.sendCandle(candle);
+      // 2. Luồng nến chính chủ từ Binance (@kline_1m, 5m, 15m, 1h, 1d)
+      if (data.e === 'kline' && data.k) {
+        const k = data.k;
+        const interval = k.i as KlineInterval;
+        if (!(KLINE_INTERVALS as string[]).includes(interval)) {
+          return;
+        }
+
+        this.klinesReceived += 1;
+
+        const candle: Candlestick = {
+          symbol: String(k.s).toUpperCase(),
+          interval,
+          openTime: Number(k.t),
+          closeTime: Number(k.T),
+          open: String(k.o),
+          high: String(k.h),
+          low: String(k.l),
+          close: String(k.c),
+          volume: String(k.v),
+          tradesCount: Number(k.n || 0),
+          isClosed: Boolean(k.x),
+        };
+
+        // Cập nhật biểu đồ realtime UI qua Centrifugo (cả nến đang chạy lẫn nến chốt)
+        this.candleAggregator.handleExchangeKline(candle);
+
+        // CHỈ đẩy Kafka & lưu trữ lâu dài khi Binance xác nhận nến đã chốt (k.x === true)
+        if (candle.isClosed) {
+          const latencyMs = Date.now() - candle.closeTime;
+          this.closedKlinesReceived += 1;
+          this.lastKlineLatencyMs = latencyMs;
+          this.totalKlineLatencyMs += latencyMs;
+
+          this.logger.debug(
+            `[KlineClosed] ${candle.symbol} ${candle.interval} close=${candle.close} openTime=${candle.openTime} latency=${latencyMs}ms`,
+          );
+
+          // Hot path không chặn: đẩy Kafka ngay cho Python worker, ghi RAM + Postgres song song
+          void this.kafkaService.sendCandle(candle);
+          void this.candleStore.saveClosedCandle(candle);
         }
       }
     } catch (err) {
@@ -131,8 +220,7 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Lên lịch kết nối lại theo thuật toán Exponential Backoff
-   * Thời gian chờ: min(1000 * 2^attempts, 30000) ms
+   * Lên lịch kết nối lại theo thuật toán Exponential Backoff: min(1000 * 2^attempts, 30000) ms
    */
   private scheduleReconnect() {
     if (this.isDestroyed) return;
@@ -166,19 +254,26 @@ export class BinanceIngestionService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Lấy trạng thái hoạt động của Ingestion Service
+   * Lấy trạng thái hoạt động & thống kê độ trễ kline của Ingestion Service
    */
   getStatus() {
     return {
       status: this.connectionStatus,
       reconnectAttempts: this.reconnectAttempts,
       totalTicksReceived: this.ticksReceived,
+      totalKlinesReceived: this.klinesReceived,
+      totalClosedKlinesReceived: this.closedKlinesReceived,
+      lastKlineLatencyMs: this.lastKlineLatencyMs,
+      avgKlineLatencyMs:
+        this.closedKlinesReceived > 0
+          ? Math.round(this.totalKlineLatencyMs / this.closedKlinesReceived)
+          : null,
       lastTickTimestamp: this.lastTickTimestamp,
       lastTickTime: this.lastTickTimestamp
         ? new Date(this.lastTickTimestamp).toISOString()
         : null,
       subscribedSymbols: ENV.BINANCE.SYMBOLS,
+      subscribedIntervals: this.klineBackfill.getConfiguredIntervals(),
     };
   }
 }
-

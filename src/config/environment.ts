@@ -28,6 +28,8 @@ export const ENV = {
     MGMT_PORT: Number(process.env.RABBITMQ_MGMT_PORT) || 15672,
     ORDER_QUEUE: 'orders.queue',
     ORDER_DLQ: 'orders.dlq',
+    SIGNAL_QUEUE: 'trading.signals',
+    SIGNAL_DLQ: 'trading.signals.dlq',
     EVENT_EXCHANGE: 'fintrade.events',
   },
   KAFKA: {
@@ -50,7 +52,18 @@ export const ENV = {
   },
   BINANCE: {
     WS_URL: process.env.BINANCE_WS_URL || 'wss://stream.binance.com:9443/ws',
-    SYMBOLS: (process.env.BINANCE_SYMBOLS || 'btcusdt,ethusdt,solusdt').split(','),
+    REST_URL: process.env.BINANCE_REST_URL || 'https://api.binance.com',
+    SYMBOLS: (process.env.BINANCE_SYMBOLS || 'btcusdt,ethusdt,solusdt')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    KLINE_INTERVALS: (
+      process.env.BINANCE_KLINE_INTERVALS || '1m,5m,15m,1h,1d'
+    )
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    KLINE_WARMUP_BARS: Number(process.env.KLINE_WARMUP_BARS) || 1000,
   },
   JWT: {
     JWT_SECRET: process.env.JWT_SECRET || 'super-jwt-secret-key-change-me-in-production',

@@ -25,16 +25,21 @@ interface EventConsumerRegistration {
   handler: (routingKey: string, payload: any) => Promise<void>;
 }
 
+export type SignalQueueHandler = (payload: any) => Promise<'ACK' | 'NACK'>;
+
 @Injectable()
 export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OrderRabbitmqService.name);
   private readonly dlxName = 'orders.dlx';
+  private readonly signalDlxName = 'signals.dlx';
   private readonly consumerPrefetch = 10;
 
   private connection: Connection | null = null;
   private confirmChannel: ConfirmChannel | null = null;
   private consumerChannel: Channel | null = null;
+  private signalConsumerChannel: Channel | null = null;
   private orderHandler: OrderQueueHandler | null = null;
+  private signalHandler: SignalQueueHandler | null = null;
   private eventConsumers: EventConsumerRegistration[] = [];
 
   private isConnected = false;
@@ -69,6 +74,16 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Đăng ký consumer nhận Alpha Signals từ Python quant-worker trên queue trading.signals
+   */
+  async registerSignalConsumer(handler: SignalQueueHandler): Promise<void> {
+    this.signalHandler = handler;
+    if (this.isConnected && this.connection) {
+      await this.startSignalConsuming();
+    }
+  }
+
+  /**
    * Kết nối RabbitMQ, khai báo Topology (Durable Queue + DLX/DLQ + Topic Exchange)
    */
   async connectBroker(): Promise<boolean> {
@@ -86,6 +101,7 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
         this.isConnected = false;
         this.confirmChannel = null;
         this.consumerChannel = null;
+        this.signalConsumerChannel = null;
         if (!this.isDestroyed) {
           this.logger.warn('RabbitMQ connection closed. Scheduling reconnect...');
           this.scheduleReconnect();
@@ -111,6 +127,11 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
       // 4. Nếu worker handler đã đăng ký, kích hoạt consumer ngay
       if (this.orderHandler) {
         await this.startConsuming();
+      }
+
+      // 4b. Nếu signal consumer đã đăng ký, kích hoạt consumer trading.signals
+      if (this.signalHandler) {
+        await this.startSignalConsuming();
       }
 
       // 5. Khởi động lại các event consumer đã đăng ký (Idempotent)
@@ -155,6 +176,62 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
     await channel.assertExchange(ENV.RABBITMQ.EVENT_EXCHANGE, 'topic', {
       durable: true,
     });
+
+    // Alpha Signals Queue & DLQ (cho Pha 7 Python Quant Worker -> NestJS Execution)
+    await channel.assertExchange(this.signalDlxName, 'direct', { durable: true });
+    await channel.assertQueue(ENV.RABBITMQ.SIGNAL_DLQ, { durable: true });
+    await channel.bindQueue(
+      ENV.RABBITMQ.SIGNAL_DLQ,
+      this.signalDlxName,
+      ENV.RABBITMQ.SIGNAL_DLQ,
+    );
+    await channel.assertQueue(ENV.RABBITMQ.SIGNAL_QUEUE, {
+      durable: true,
+      arguments: {
+        'x-dead-letter-exchange': this.signalDlxName,
+        'x-dead-letter-routing-key': ENV.RABBITMQ.SIGNAL_DLQ,
+      },
+    });
+  }
+
+  /**
+   * Bắt đầu tiêu thụ Alpha Signals từ queue trading.signals với Manual Ack & DLQ
+   */
+  private async startSignalConsuming(): Promise<void> {
+    if (!this.connection || !this.signalHandler) return;
+
+    const channel = await this.connection.createChannel();
+    this.signalConsumerChannel = channel;
+    await channel.prefetch(this.consumerPrefetch);
+
+    const handler = this.signalHandler;
+    await channel.consume(
+      ENV.RABBITMQ.SIGNAL_QUEUE,
+      async (msg: ConsumeMessage | null) => {
+        if (!msg) return;
+
+        try {
+          const payload = JSON.parse(msg.content.toString());
+          const result = await handler(payload);
+
+          if (result === 'ACK') {
+            channel.ack(msg);
+          } else {
+            channel.nack(msg, false, false);
+          }
+        } catch (err) {
+          this.logger.error(
+            `Unhandled error processing trading signal, routing to DLQ: ${(err as Error).message}`,
+          );
+          channel.nack(msg, false, false);
+        }
+      },
+      { noAck: false },
+    );
+
+    this.logger.log(
+      `Signal consumer active on [${ENV.RABBITMQ.SIGNAL_QUEUE}] (dlq=${ENV.RABBITMQ.SIGNAL_DLQ}, manualAck=true)`,
+    );
   }
 
   /**
@@ -329,6 +406,10 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
 
   private async closeConnections() {
     try {
+      if (this.signalConsumerChannel) {
+        await this.signalConsumerChannel.close();
+        this.signalConsumerChannel = null;
+      }
       if (this.consumerChannel) {
         await this.consumerChannel.close();
         this.consumerChannel = null;
@@ -355,6 +436,8 @@ export class OrderRabbitmqService implements OnModuleInit, OnModuleDestroy {
         orderQueue: ENV.RABBITMQ.ORDER_QUEUE,
         deadLetterExchange: this.dlxName,
         deadLetterQueue: ENV.RABBITMQ.ORDER_DLQ,
+        signalQueue: ENV.RABBITMQ.SIGNAL_QUEUE,
+        signalDeadLetterQueue: ENV.RABBITMQ.SIGNAL_DLQ,
         eventExchange: ENV.RABBITMQ.EVENT_EXCHANGE,
         prefetch: this.consumerPrefetch,
       },

@@ -12,11 +12,15 @@ import {
 import { ApiOperation } from '@nestjs/swagger';
 import { ApiHandleResponse } from 'src/decorator/api.decorator';
 import { IsAuthController } from 'src/decorator/auth.decorator';
-import { RequestAuth } from 'src/dto/common-request.dto';
 import { CreateBotDto } from 'src/dto/bot-dto/create-bot.dto';
+import { RequestAuth } from 'src/dto/common-request.dto';
 import { BotService } from './bot.service';
 
-@IsAuthController('bots', 'Automated Trading Bots (Grid & Alpha Signals)', false)
+@IsAuthController(
+  'bots',
+  'Automated Trading Bots (Grid & External Alpha Signals)',
+  false,
+)
 export class BotController {
   constructor(private readonly botService: BotService) {}
 
@@ -24,7 +28,7 @@ export class BotController {
   @ApiOperation({
     summary: 'Tạo cấu hình bot giao dịch tự động mới',
     description:
-      'Hỗ trợ 2 chiến lược: GRID_TRADING (Lưới giá tự động) hoặc EMA_CROSS (Cắt EMA 9/21 theo xu hướng)',
+      'Hỗ trợ 2 chế độ: GRID_TRADING (Lưới giá tự động) hoặc ALPHA_SIGNAL (Thực thi lệnh theo tín hiệu từ Python Quant Worker)',
   })
   @ApiHandleResponse({
     summary: 'Create trading bot',
@@ -50,6 +54,19 @@ export class BotController {
     return await this.botService.getUserBots(userId);
   }
 
+  @Get('/signals/status')
+  @ApiOperation({
+    summary: 'Giám sát trạng thái & độ trễ pipeline nhận tín hiệu Alpha từ Python Quant Worker',
+  })
+  @ApiHandleResponse({
+    summary: 'Get alpha signal consumer status',
+    type: Object,
+    httpStatus: HttpStatus.OK,
+  })
+  getSignalPipelineStatus() {
+    return this.botService.getSignalPipelineStatus();
+  }
+
   @Get('/:id')
   @ApiOperation({
     summary: 'Xem chi tiết 1 bot giao dịch',
@@ -71,7 +88,7 @@ export class BotController {
   @ApiOperation({
     summary: 'Kích hoạt chạy bot (Start)',
     description:
-      'Khởi tạo lưới các lệnh chờ đối với Grid Bot, hoặc kích hoạt theo dõi đóng nến đối với EMA Bot',
+      'Khởi tạo lưới lệnh chờ với Grid Bot, hoặc đăng ký lắng nghe tín hiệu trên RabbitMQ trading.signals với Alpha Signal Bot',
   })
   @ApiHandleResponse({
     summary: 'Start bot',
@@ -89,7 +106,7 @@ export class BotController {
   @Patch('/:id/stop')
   @ApiOperation({
     summary: 'Tạm dừng bot (Stop)',
-    description: 'Hủy toàn bộ các lệnh đang treo trên sàn của bot và dừng thuật toán',
+    description: 'Hủy toàn bộ lệnh đang treo (Grid) hoặc ngưng nhận tín hiệu (Alpha Signal)',
   })
   @ApiHandleResponse({
     summary: 'Stop bot',
@@ -120,22 +137,5 @@ export class BotController {
     const userId = req.user?.userId || 1;
     await this.botService.deleteBot(userId, id);
     return { success: true };
-  }
-
-  @Get('/:id/indicators')
-  @ApiOperation({
-    summary: 'Lấy giá trị các chỉ báo kỹ thuật hiện tại của bot (EMA 9, EMA 21, Tín hiệu)',
-  })
-  @ApiHandleResponse({
-    summary: 'Get bot indicators',
-    type: Object,
-    httpStatus: HttpStatus.OK,
-  })
-  async getBotIndicators(
-    @Param('id', ParseIntPipe) id: number,
-    @Req() req: RequestAuth,
-  ) {
-    const userId = req.user?.userId || 1;
-    return await this.botService.getBotIndicators(userId, id);
   }
 }

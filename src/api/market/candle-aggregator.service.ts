@@ -10,10 +10,10 @@ import {
 @Injectable()
 export class CandleAggregatorService {
   private readonly MAX_CANDLES_HISTORY = 500;
+  // Chỉ tự gom nến 1s từ luồng @trade cho biểu đồ UI siêu mượt.
+  // Các khung 1m, 5m, 15m, 1h, 1d lấy trực tiếp từ Binance @kline_<interval> & REST /api/v3/klines (khớp 1:1 với backtest).
   private readonly intervals: { interval: CandleInterval; ms: number }[] = [
     { interval: '1s', ms: 1000 },
-    { interval: '1m', ms: 60 * 1000 },
-    { interval: '15m', ms: 15 * 60 * 1000 },
   ];
 
   // Lưu trữ tick giá mới nhất của từng cặp coin
@@ -22,7 +22,7 @@ export class CandleAggregatorService {
   // Lưu trữ nến đang chạy (active rolling candle): key = `${symbol}_${interval}`
   private activeCandles = new Map<string, Candlestick>();
 
-  // Ring buffer lưu trữ lịch sử nến đã hoàn thành: key = `${symbol}_${interval}`
+  // Ring buffer lưu trữ lịch sử nến 1s đã hoàn thành: key = `${symbol}_1s`
   private candleHistory = new Map<string, Candlestick[]>();
 
   // Danh sách các cặp giao dịch được hỗ trợ
@@ -50,11 +50,14 @@ export class CandleAggregatorService {
     },
   ];
 
-  // Callback listeners khi có tick mới (cho Matching Engine, WebSocket broadcast)
+  // Callback listeners khi có tick mới (cho Matching Engine, Centrifugo broadcast)
   private readonly tickListeners: ((tick: MarketTick) => void)[] = [];
 
   // Callback listeners khi có nến mới/đóng nến (cho Centrifugo, TradingView charts)
-  private readonly candleListeners: ((candle: Candlestick, isClosed: boolean) => void)[] = [];
+  private readonly candleListeners: ((
+    candle: Candlestick,
+    isClosed: boolean,
+  ) => void)[] = [];
 
   /**
    * Đăng ký callback nhận luồng tick thời gian thực
@@ -71,8 +74,28 @@ export class CandleAggregatorService {
   }
 
   /**
-   * Xử lý một tick giá mới nhận được từ Binance/Kafka
-   * Cập nhật hoặc đóng nến OHLCV theo thời gian thực
+   * Tiếp nhận bản tin kline trực tiếp từ Binance WebSocket (@kline_1m, 5m, 15m, 1h, 1d)
+   * để cập nhật active candle cho chart UI và phát sự kiện tới các listeners (Centrifugo).
+   */
+  handleExchangeKline(candle: Candlestick): void {
+    const key = `${candle.symbol.toUpperCase()}_${candle.interval}`;
+    if (candle.isClosed) {
+      const current = this.activeCandles.get(key);
+      if (current && current.openTime === candle.openTime) {
+        this.activeCandles.delete(key);
+      }
+    } else {
+      this.activeCandles.set(key, candle);
+    }
+
+    this.notifyCandleListeners(candle, candle.isClosed);
+  }
+
+  /**
+   * Xử lý một tick giá mới nhận được từ Binance @trade:
+   * - Cập nhật latestTicks
+   * - Phát sự kiện onTick (Matching Engine, Centrifugo)
+   * - Gom nến 1s in-memory cho biểu đồ realtime UI
    */
   processTick(tick: MarketTick): {
     updatedCandles: Candlestick[];
@@ -81,7 +104,6 @@ export class CandleAggregatorService {
     const symbol = tick.symbol.toUpperCase();
     this.latestTicks.set(symbol, tick);
 
-    // Kích hoạt listeners (Matching Engine, Centrifugo, etc.)
     for (const listener of this.tickListeners) {
       try {
         listener(tick);
@@ -104,14 +126,12 @@ export class CandleAggregatorService {
       const currentCandle = this.activeCandles.get(key);
 
       if (!currentCandle || tick.timestamp >= currentCandle.closeTime) {
-        // Nếu nến cũ đã hết khung thời gian -> Đóng nến cũ
         if (currentCandle) {
           const closed = { ...currentCandle, isClosed: true };
           closedCandles.push(closed);
           this.archiveCandle(key, closed);
         }
 
-        // Khởi tạo cây nến mới
         const newCandle: Candlestick = {
           symbol,
           interval,
@@ -129,7 +149,6 @@ export class CandleAggregatorService {
         this.activeCandles.set(key, newCandle);
         updatedCandles.push(newCandle);
       } else {
-        // Cập nhật cây nến hiện tại trong khung thời gian
         const highBN = BigNumber.max(currentCandle.high, tickPriceBN);
         const lowBN = BigNumber.min(currentCandle.low, tickPriceBN);
         const volumeBN = new BigNumber(currentCandle.volume).plus(tickQtyBN);
@@ -144,32 +163,29 @@ export class CandleAggregatorService {
       }
     }
 
-    // Thông báo cho các listeners về nến đóng và nến cập nhật
     for (const c of closedCandles) {
-      for (const listener of this.candleListeners) {
-        try {
-          listener(c, true);
-        } catch (err) {
-          // Tránh lỗi listener ảnh hưởng tới tiến trình
-        }
-      }
+      this.notifyCandleListeners(c, true);
     }
 
     for (const c of updatedCandles) {
-      for (const listener of this.candleListeners) {
-        try {
-          listener(c, false);
-        } catch (err) {
-          // Tránh lỗi listener
-        }
-      }
+      this.notifyCandleListeners(c, false);
     }
 
     return { updatedCandles, closedCandles };
   }
 
+  private notifyCandleListeners(candle: Candlestick, isClosed: boolean): void {
+    for (const listener of this.candleListeners) {
+      try {
+        listener(candle, isClosed);
+      } catch (err) {
+        // Tránh lỗi listener ảnh hưởng tới tiến trình
+      }
+    }
+  }
+
   /**
-   * Lưu nến đã đóng vào Ring Buffer (giới hạn 500 nến mới nhất)
+   * Lưu nến 1s đã đóng vào Ring Buffer (giới hạn 500 nến mới nhất)
    */
   private archiveCandle(key: string, candle: Candlestick) {
     let history = this.candleHistory.get(key);
@@ -180,8 +196,15 @@ export class CandleAggregatorService {
 
     history.push(candle);
     if (history.length > this.MAX_CANDLES_HISTORY) {
-      history.shift(); // Loại bỏ nến cũ nhất để tránh leak memory
+      history.shift();
     }
+  }
+
+  /**
+   * Lấy cây nến đang chạy (chưa đóng) của một (symbol, interval) cho UI chart
+   */
+  getActiveCandle(symbol: string, interval: CandleInterval): Candlestick | null {
+    return this.activeCandles.get(`${symbol.toUpperCase()}_${interval}`) || null;
   }
 
   /**
@@ -203,11 +226,11 @@ export class CandleAggregatorService {
   }
 
   /**
-   * Lấy danh sách nến để vẽ biểu đồ TradingView / Lightweight Charts
+   * Lấy danh sách nến 1s từ RAM để vẽ biểu đồ realtime UI
    */
   getCandles(
     symbol: string,
-    interval: CandleInterval = '1m',
+    interval: CandleInterval = '1s',
     limit = 100,
   ): Candlestick[] {
     const key = `${symbol.toUpperCase()}_${interval}`;
@@ -227,4 +250,3 @@ export class CandleAggregatorService {
     return this.supportedSymbols;
   }
 }
-

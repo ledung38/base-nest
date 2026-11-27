@@ -7,7 +7,18 @@ export interface MarketTick {
   isBuyerMaker: boolean; // true: Sell order triggered, false: Buy order triggered
 }
 
-export type CandleInterval = '1s' | '1m' | '15m';
+export type KlineInterval = '1m' | '5m' | '15m' | '1h' | '1d';
+export type CandleInterval = '1s' | KlineInterval;
+
+export const KLINE_INTERVALS: KlineInterval[] = ['1m', '5m', '15m', '1h', '1d'];
+
+export const KLINE_INTERVAL_MS: Record<KlineInterval, number> = {
+  '1m': 60 * 1000,
+  '5m': 5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000,
+};
 
 export interface Candlestick {
   symbol: string;
@@ -30,4 +41,3 @@ export interface MarketSymbolInfo {
   priceDecimals: number;
   quantityDecimals: number;
 }
-

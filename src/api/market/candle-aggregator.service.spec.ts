@@ -1,7 +1,7 @@
 import { CandleAggregatorService } from './candle-aggregator.service';
-import { MarketTick } from './market.interface';
+import { Candlestick, MarketTick } from './market.interface';
 
-describe('CandleAggregatorService (OHLCV Rolling Aggregator)', () => {
+describe('CandleAggregatorService (1s Tick Aggregator & Exchange Kline Bridge)', () => {
   let service: CandleAggregatorService;
 
   beforeEach(() => {
@@ -14,8 +14,8 @@ describe('CandleAggregatorService (OHLCV Rolling Aggregator)', () => {
     expect(symbols.map((s) => s.symbol)).toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
   });
 
-  it('should create a new active candle on the first tick', () => {
-    const baseTime = 1700000000000; // Epoch ms
+  it('should create a new active 1s candle on the first tick', () => {
+    const baseTime = 1700000000000;
     const tick: MarketTick = {
       symbol: 'BTCUSDT',
       price: '50000.00',
@@ -28,106 +28,123 @@ describe('CandleAggregatorService (OHLCV Rolling Aggregator)', () => {
     const { updatedCandles, closedCandles } = service.processTick(tick);
 
     expect(closedCandles).toHaveLength(0);
-    // 3 intervals: 1s, 1m, 15m
-    expect(updatedCandles).toHaveLength(3);
+    // Chỉ tự gom nến 1s từ tick (1m..1d lấy trực tiếp từ Binance @kline)
+    expect(updatedCandles).toHaveLength(1);
 
-    const candle1m = updatedCandles.find((c) => c.interval === '1m');
-    expect(candle1m).toBeDefined();
-    expect(candle1m?.open).toBe('50000.00');
-    expect(candle1m?.high).toBe('50000.00');
-    expect(candle1m?.low).toBe('50000.00');
-    expect(candle1m?.close).toBe('50000.00');
-    expect(candle1m?.volume).toBe('1.50000000');
-    expect(candle1m?.tradesCount).toBe(1);
-    expect(candle1m?.isClosed).toBe(false);
+    const candle1s = updatedCandles[0];
+    expect(candle1s.interval).toBe('1s');
+    expect(candle1s.open).toBe('50000.00');
+    expect(candle1s.high).toBe('50000.00');
+    expect(candle1s.low).toBe('50000.00');
+    expect(candle1s.close).toBe('50000.00');
+    expect(candle1s.volume).toBe('1.50000000');
+    expect(candle1s.tradesCount).toBe(1);
+    expect(candle1s.isClosed).toBe(false);
 
     expect(service.getLatestPrice('BTCUSDT')).toEqual(tick);
   });
 
-  it('should update high, low, close and volume for ticks within the same candle window', () => {
+  it('should update high, low, close and volume for ticks within the same 1s window', () => {
     const baseTime = 1700000000000;
 
-    // Tick 1: Open at 50,000
     service.processTick({
       symbol: 'BTCUSDT',
       price: '50000.00',
       quantity: '1.00000000',
-      timestamp: baseTime,
+      timestamp: baseTime + 100,
       tradeId: 'T1',
       isBuyerMaker: false,
     });
-
-    // Tick 2: Higher price at 52,000 (10s later in same 1m window)
     service.processTick({
       symbol: 'BTCUSDT',
       price: '52000.00',
       quantity: '2.00000000',
-      timestamp: baseTime + 10000,
+      timestamp: baseTime + 400,
       tradeId: 'T2',
       isBuyerMaker: false,
     });
-
-    // Tick 3: Lower price at 49,000 (20s later in same 1m window)
     service.processTick({
       symbol: 'BTCUSDT',
       price: '49000.00',
       quantity: '0.50000000',
-      timestamp: baseTime + 20000,
+      timestamp: baseTime + 800,
       tradeId: 'T3',
       isBuyerMaker: false,
     });
 
-    const candles = service.getCandles('BTCUSDT', '1m', 10);
+    const candles = service.getCandles('BTCUSDT', '1s', 10);
     expect(candles).toHaveLength(1);
 
-    const current1m = candles[0];
-    expect(current1m.open).toBe('50000.00');
-    expect(current1m.high).toBe('52000.00000000');
-    expect(current1m.low).toBe('49000.00000000');
-    expect(current1m.close).toBe('49000.00');
-    expect(current1m.volume).toBe('3.50000000');
-    expect(current1m.tradesCount).toBe(3);
-    expect(current1m.isClosed).toBe(false);
+    const current1s = candles[0];
+    expect(current1s.open).toBe('50000.00');
+    expect(current1s.high).toBe('52000.00000000');
+    expect(current1s.low).toBe('49000.00000000');
+    expect(current1s.close).toBe('49000.00');
+    expect(current1s.volume).toBe('3.50000000');
+    expect(current1s.tradesCount).toBe(3);
+    expect(current1s.isClosed).toBe(false);
   });
 
-  it('should close the previous candle and start a new one when timestamp crosses window boundary', () => {
-    // Round to clean minute
-    const baseTime = 1700000040000; // e.g. 10:00:40
-    const minuteStart = Math.floor(baseTime / 60000) * 60000;
+  it('should close previous 1s candle when timestamp crosses 1s boundary', () => {
+    const baseSec = 1700000000000;
 
     service.processTick({
       symbol: 'BTCUSDT',
       price: '50000.00',
       quantity: '1.00000000',
-      timestamp: minuteStart + 10000, // 10:00:10
+      timestamp: baseSec + 200,
       tradeId: 'T1',
       isBuyerMaker: false,
     });
 
-    // Next tick in the NEXT minute (e.g. 10:01:05)
-    const nextMinuteTick: MarketTick = {
+    const { closedCandles } = service.processTick({
       symbol: 'BTCUSDT',
       price: '51000.00',
       quantity: '2.00000000',
-      timestamp: minuteStart + 65000, // 10:01:05
+      timestamp: baseSec + 1200,
       tradeId: 'T2',
       isBuyerMaker: false,
-    };
+    });
 
-    const { closedCandles } = service.processTick(nextMinuteTick);
+    expect(closedCandles).toHaveLength(1);
+    expect(closedCandles[0].interval).toBe('1s');
+    expect(closedCandles[0].isClosed).toBe(true);
+    expect(closedCandles[0].close).toBe('50000.00');
 
-    const closed1m = closedCandles.find((c) => c.interval === '1m');
-    expect(closed1m).toBeDefined();
-    expect(closed1m?.isClosed).toBe(true);
-    expect(closed1m?.open).toBe('50000.00');
-    expect(closed1m?.close).toBe('50000.00');
-
-    // Total candles should now be 2: 1 archived closed + 1 active
-    const candles = service.getCandles('BTCUSDT', '1m', 10);
+    const candles = service.getCandles('BTCUSDT', '1s', 10);
     expect(candles).toHaveLength(2);
     expect(candles[0].isClosed).toBe(true);
     expect(candles[1].isClosed).toBe(false);
     expect(candles[1].open).toBe('51000.00');
   });
-});
 
+  it('should track active exchange kline and emit to listeners when handleExchangeKline is called', () => {
+    const received: Array<{ candle: Candlestick; isClosed: boolean }> = [];
+    service.onCandle((candle, isClosed) => received.push({ candle, isClosed }));
+
+    const active5m: Candlestick = {
+      symbol: 'BTCUSDT',
+      interval: '5m',
+      openTime: 1700000100000,
+      closeTime: 1700000399999,
+      open: '65000.00',
+      high: '65200.00',
+      low: '64900.00',
+      close: '65100.00',
+      volume: '12.50000000',
+      tradesCount: 150,
+      isClosed: false,
+    };
+
+    service.handleExchangeKline(active5m);
+    expect(service.getActiveCandle('BTCUSDT', '5m')).toEqual(active5m);
+    expect(received).toHaveLength(1);
+    expect(received[0].isClosed).toBe(false);
+
+    const closed5m: Candlestick = { ...active5m, close: '65150.00', isClosed: true };
+    service.handleExchangeKline(closed5m);
+    expect(service.getActiveCandle('BTCUSDT', '5m')).toBeNull();
+    expect(received).toHaveLength(2);
+    expect(received[1].isClosed).toBe(true);
+  });
+});

@@ -11,4 +11,5 @@ export const EntityNameConst = Object.freeze({
   ORDER: 'order',
   TRADE: 'trade',
   BOT_CONFIG: 'bot_config',
+  MARKET_CANDLE: 'market_candle',
 });

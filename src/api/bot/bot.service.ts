@@ -12,8 +12,8 @@ import { BotTypeEnum } from 'src/constant/trading.enum';
 import { CreateBotDto } from 'src/dto/bot-dto/create-bot.dto';
 import { BotConfig } from 'src/entities/bot-config.entity';
 import { Repository } from 'typeorm';
-import { IndicatorSnapshot } from './bot.interface';
-import { EmaCrossWorker } from './workers/ema-cross.worker';
+import { SignalPipelineStatus } from './bot.interface';
+import { SignalConsumerService } from './signal-consumer.service';
 import { GridTradingWorker } from './workers/grid-trading.worker';
 
 @Injectable()
@@ -25,7 +25,7 @@ export class BotService implements OnModuleInit {
     @InjectRepository(BotConfig)
     private readonly botConfigRepo: Repository<BotConfig>,
     private readonly gridWorker: GridTradingWorker,
-    private readonly emaWorker: EmaCrossWorker,
+    private readonly signalWorker: SignalConsumerService,
     private readonly rabbitmqService: OrderRabbitmqService,
   ) {}
 
@@ -33,15 +33,22 @@ export class BotService implements OnModuleInit {
     // 1. Phục hồi các bot đang chạy khi khởi động server
     await this.restoreActiveBots();
 
-    // 2. Đăng ký consumer lắng nghe sự kiện khớp lệnh (trade.executed) từ RabbitMQ
+    // 2. Đăng ký consumer lắng nghe sự kiện khớp lệnh (trade.executed) cho Grid Bot
     await this.rabbitmqService.registerEventConsumer(
       this.BOT_EVENT_QUEUE,
       'trade.*',
       async (routingKey, payload) => {
         if (routingKey === 'trade.executed') {
-          await this.gridWorker.handleTradeExecuted(payload as TradeDomainEvent);
+          await this.gridWorker.handleTradeExecuted(
+            payload as TradeDomainEvent,
+          );
         }
       },
+    );
+
+    // 3. Đăng ký consumer lắng nghe tín hiệu Alpha từ Python quant-worker trên queue trading.signals
+    await this.rabbitmqService.registerSignalConsumer((payload) =>
+      this.signalWorker.handleSignal(payload),
     );
   }
 
@@ -57,12 +64,14 @@ export class BotService implements OnModuleInit {
       for (const bot of activeBots) {
         if (bot.botType === BotTypeEnum.GRID_TRADING) {
           await this.gridWorker.startBot(bot);
-        } else if (bot.botType === BotTypeEnum.EMA_CROSS) {
-          await this.emaWorker.startBot(bot);
+        } else if (bot.botType === BotTypeEnum.ALPHA_SIGNAL) {
+          await this.signalWorker.startBot(bot);
         }
       }
 
-      this.logger.log(`Restored and activated ${activeBots.length} bots from database.`);
+      this.logger.log(
+        `Restored and activated ${activeBots.length} bots from database.`,
+      );
     } catch (err) {
       this.logger.error('Failed to restore active bots on startup:', err);
     }
@@ -131,8 +140,8 @@ export class BotService implements OnModuleInit {
 
     if (bot.botType === BotTypeEnum.GRID_TRADING) {
       await this.gridWorker.startBot(bot);
-    } else if (bot.botType === BotTypeEnum.EMA_CROSS) {
-      await this.emaWorker.startBot(bot);
+    } else if (bot.botType === BotTypeEnum.ALPHA_SIGNAL) {
+      await this.signalWorker.startBot(bot);
     }
 
     bot.isActive = true;
@@ -152,8 +161,8 @@ export class BotService implements OnModuleInit {
 
     if (bot.botType === BotTypeEnum.GRID_TRADING) {
       await this.gridWorker.stopBot(bot.id);
-    } else if (bot.botType === BotTypeEnum.EMA_CROSS) {
-      await this.emaWorker.stopBot(bot.id);
+    } else if (bot.botType === BotTypeEnum.ALPHA_SIGNAL) {
+      await this.signalWorker.stopBot(bot.id);
     }
 
     bot.isActive = false;
@@ -172,10 +181,9 @@ export class BotService implements OnModuleInit {
   }
 
   /**
-   * Lấy snapshot chỉ báo kỹ thuật hiện tại cho Bot
+   * Thống kê pipeline nhận tín hiệu từ Python quant-worker
    */
-  async getBotIndicators(userId: number, botId: number): Promise<IndicatorSnapshot> {
-    const bot = await this.getBotById(userId, botId);
-    return this.emaWorker.getIndicatorSnapshot(bot);
+  getSignalPipelineStatus(): SignalPipelineStatus {
+    return this.signalWorker.getStatus();
   }
 }
